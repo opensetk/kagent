@@ -55,6 +55,7 @@ LLM_MODEL=gpt-4-turbo
 APP_ID=cli_xxx
 APP_SECRET=xxx
 ```
+飞书的配置参考 https://open.feishu.cn/document/home/index
 
 ### 3. 运行本地 Shell 测试
 ```bash
@@ -83,8 +84,8 @@ async def get_weather(city: str) -> str:
 ### 自定义 Hook
 可以在 `InteractionManager` 中注册指令 Hook，拦截特定输入。
 
-## 📄 飞书消息增强
-本项目已全面适配飞书 **卡片 JSON 2.0** 结构，支持更美观的 Markdown 渲染。所有 Agent 回复均通过 `interactive` 卡片发送，确保代码块、表格等复杂格式在飞书客户端完美展示。
+## 🤖飞书示例
 
----
-Built with ❤️ by kAgent Team
+![feishu1](assets/feishu1.png)
+
+![feishu2](assets/feishu2.png)
