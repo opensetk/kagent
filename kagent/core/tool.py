@@ -24,6 +24,71 @@ from pathlib import Path
 from typing import Dict, Any, List, Callable, Awaitable, Optional, Union, TypeVar
 
 
+class MCPToolAdapter:
+    """
+    Adapter to bridge MCP (Model Context Protocol) tools into the kagent tool system.
+    """
+
+    def __init__(self, mcp_url: str):
+        self.mcp_url = mcp_url
+        self.tools_cache = {}
+
+    async def get_mcp_tools(self) -> List["Tool"]:
+        """Fetch tools from MCP server and wrap them as kagent Tools."""
+        try:
+            from fastmcp import Client
+        except ImportError:
+            print("Warning: fastmcp not installed. MCP tools will not be available.")
+            return []
+
+        try:
+            async with Client(self.mcp_url) as client:
+                mcp_tools = await client.list_tools()
+                kagent_tools = []
+                for tool in mcp_tools:
+                    # Create a handler that calls the MCP tool
+                    # We need to capture the current tool name in the closure
+                    handler = self._make_handler(tool.name)
+
+                    kagent_tool = Tool(
+                        name=tool.name,
+                        description=tool.description or "",
+                        parameters=tool.inputSchema or {"type": "object", "properties": {}},
+                        handler=handler,
+                    )
+                    kagent_tools.append(kagent_tool)
+                    self.tools_cache[tool.name] = tool
+
+                return kagent_tools
+        except Exception as e:
+            print(f"Error fetching MCP tools from {self.mcp_url}: {e}")
+            return []
+
+    def _make_handler(self, tool_name: str):
+        """Helper to create a handler closure for an MCP tool."""
+
+        async def handler(**arguments):
+            return await self.call_mcp_tool(tool_name, arguments)
+
+        return handler
+
+    async def call_mcp_tool(self, tool_name: str, arguments: dict):
+        """Call an MCP tool and return the result."""
+        from fastmcp import Client
+
+        try:
+            async with Client(self.mcp_url) as client:
+                result = await client.call_tool(tool_name, arguments)
+                # Handle different result formats from fastmcp
+                if hasattr(result, "data"):
+                    return result.data
+                if hasattr(result, "content") and len(result.content) > 0:
+                    return result.content[0].text
+                return str(result)
+        except Exception as e:
+            raise Exception(f"Failed to call MCP tool '{tool_name}': {e}")
+
+
 @dataclass
 class ToolResult:
     """Result of a tool execution."""
@@ -199,16 +264,65 @@ class ToolManager:
     - Provide tools in OpenAI function calling format
     """
 
-    def __init__(self, load_builtin: bool = True):
+    def __init__(self, load_builtin: bool = True, load_mcp: bool = True):
         """
         Initialize ToolManager.
 
         Args:
             load_builtin: Whether to automatically load built-in tools from kagent.tools
+            load_mcp: Whether to automatically load MCP tools from .agent/mcp.json
         """
         self._tools: Dict[str, Tool] = {}
+        self._load_mcp_flag = load_mcp
+        self._mcp_load_task: Optional[asyncio.Task] = None
+
         if load_builtin:
             self.load_builtin_tools()
+        if load_mcp:
+            # Try to start loading immediately if loop exists
+            self._check_and_start_mcp_load()
+
+    def _check_and_start_mcp_load(self) -> None:
+        """Check if an event loop is running and start the MCP loading task."""
+        if not self._load_mcp_flag or self._mcp_load_task:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._mcp_load_task = loop.create_task(self.load_mcp_tools())
+        except RuntimeError:
+            # No running loop yet
+            pass
+
+    async def load_mcp_tools(self) -> None:
+        """
+        Load MCP tools from .agent/mcp.json.
+        """
+        mcp_config_path = Path(".agent/mcp.json")
+        if not mcp_config_path.exists():
+            return
+
+        try:
+            with open(mcp_config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+
+            # mcp.json can be a list of configs or a single config
+            configs = config if isinstance(config, list) else [config]
+
+            for entry in configs:
+                mcp_servers = entry.get("mcpServers", {})
+                for server_name, server_config in mcp_servers.items():
+                    url = server_config.get("url")
+                    if url:
+                        print(f"🔄 Loading MCP tools from {server_name} ({url})...")
+                        adapter = MCPToolAdapter(url)
+                        mcp_tools = await adapter.get_mcp_tools()
+                        for t in mcp_tools:
+                            self.register(t)
+                        if mcp_tools:
+                            print(f"✅ Loaded {len(mcp_tools)} tools from MCP server: {server_name}")
+        except Exception as e:
+            print(f"Error loading MCP config: {e}")
 
     def load_builtin_tools(self) -> None:
         """
@@ -268,14 +382,19 @@ class ToolManager:
 
     def list_tools(self) -> List[Tool]:
         """List all registered tools."""
+        self._check_and_start_mcp_load()
         return list(self._tools.values())
 
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Get all tools in OpenAI function calling format."""
+        self._check_and_start_mcp_load()
         return [tool.to_openai_format() for tool in self._tools.values()]
 
     async def execute(self, tool_name: str, arguments: Dict[str, Any]) -> ToolResult:
         """Execute a tool with given arguments."""
+        # Ensure MCP tools are being loaded if they haven't started yet
+        self._check_and_start_mcp_load()
+
         tool = self.get_tool(tool_name)
         if not tool:
             return ToolResult(
