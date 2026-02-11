@@ -128,10 +128,9 @@ class AudioChannel(BaseChannel):
         self.is_running = False
         self.recorder = AudioRecorder(input_device_index=input_device_index)
         
-        api_key = os.environ.get("SILICONFLOW_API_KEY")
+        api_key = os.environ.get("ASR_API_KEY")
         if not api_key:
-            # Fallback for testing as in the original script
-            api_key = "sk-mzwuunvvjoamyfgslvepqnpkguepjetgiumodtrrtcmirfya"
+            raise ValueError("ASR_API_KEY environment variable is not set")
         
         self.asr = SiliconFlowASR(api_key)
         self.asr_model = os.environ.get("ASR_MODEL", "TeleAI/TeleSpeechASR")
