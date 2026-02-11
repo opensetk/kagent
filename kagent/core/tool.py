@@ -306,21 +306,26 @@ class ToolManager:
             with open(mcp_config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-            # mcp.json can be a list of configs or a single config
-            configs = config if isinstance(config, list) else [config]
+            # Standard MCP format has "mcpServers" at root
+            mcp_servers = config.get("mcpServers", {}) if isinstance(config, dict) else {}
 
-            for entry in configs:
-                mcp_servers = entry.get("mcpServers", {})
-                for server_name, server_config in mcp_servers.items():
-                    url = server_config.get("url")
-                    if url:
-                        print(f"🔄 Loading MCP tools from {server_name} ({url})...")
-                        adapter = MCPToolAdapter(url)
-                        mcp_tools = await adapter.get_mcp_tools()
-                        for t in mcp_tools:
-                            self.register(t)
-                        if mcp_tools:
-                            print(f"✅ Loaded {len(mcp_tools)} tools from MCP server: {server_name}")
+            # Handle list format as fallback
+            if not mcp_servers and isinstance(config, list):
+                for entry in config:
+                    mcp_servers.update(entry.get("mcpServers", {}))
+
+            for server_name, server_config in mcp_servers.items():
+                url = server_config.get("url")
+                if url:
+                    print(f"🔄 Loading MCP tools from {server_name} ({url})...")
+                    adapter = MCPToolAdapter(url)
+                    mcp_tools = await adapter.get_mcp_tools()
+                    for t in mcp_tools:
+                        self.register(t)
+                    if mcp_tools:
+                        print(
+                            f"✅ Loaded {len(mcp_tools)} tools from MCP server: {server_name}"
+                        )
         except Exception as e:
             print(f"Error loading MCP config: {e}")
 
