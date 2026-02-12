@@ -5,6 +5,8 @@ Context module for kagent - manages conversation history and token compression.
 from typing import List, Dict, Any, Optional, Callable
 import tiktoken
 
+from kagent.core.skill import SkillManager, Skill
+
 
 class ContextManager:
     """
@@ -20,6 +22,7 @@ class ContextManager:
         max_tokens: int = 100000,
         compression_callback: Optional[Callable[[str], None]] = None,
         system_prompt: Optional[str] = None,
+        skill_manager: Optional[SkillManager] = None,
     ):
         """
         Initialize ContextManager.
@@ -29,6 +32,7 @@ class ContextManager:
             max_tokens: Maximum token threshold before compression
             compression_callback: Optional callback function when compression is triggered
             system_prompt: Optional custom system prompt (overrides KAGENT.md)
+            skill_manager: Optional SkillManager for loading skills into prompt
         """
         self.model = model
         self.max_tokens = max_tokens
@@ -36,7 +40,8 @@ class ContextManager:
         self.conversation_history: List[Dict[str, Any]] = []
 
         # Load system prompt
-        self.system_prompt = system_prompt or self._load_system_prompt()
+        self.base_system_prompt = system_prompt or self._load_system_prompt()
+        self.system_prompt = self.base_system_prompt
 
         # Initialize tokenizer
         try:
@@ -44,6 +49,10 @@ class ContextManager:
         except KeyError:
             # Fallback to cl100k_base for unknown models
             self.encoding = tiktoken.get_encoding("cl100k_base")
+        
+        # Skill manager for loading skills
+        self.skill_manager = skill_manager
+        self._loaded_skills: List[Skill] = []
 
     def _load_system_prompt(self) -> str:
         """
@@ -88,6 +97,67 @@ class ContextManager:
         if self.should_compress():
             self.compress_context()
 
+    def load_skill(self, skill_name: str) -> bool:
+        """
+        Load a skill into the system prompt.
+        
+        Args:
+            skill_name: Name of the skill to load
+            
+        Returns:
+            True if skill was loaded successfully
+        """
+        if not self.skill_manager:
+            return False
+        
+        skill = self.skill_manager.get_skill(skill_name)
+        if not skill:
+            return False
+        
+        # Add to loaded skills
+        if skill not in self._loaded_skills:
+            self._loaded_skills.append(skill)
+            self._rebuild_system_prompt()
+            return True
+        
+        return False
+    
+    def unload_skill(self, skill_name: str) -> bool:
+        """
+        Unload a skill from the system prompt.
+        
+        Args:
+            skill_name: Name of the skill to unload
+            
+        Returns:
+            True if skill was unloaded
+        """
+        self._loaded_skills = [s for s in self._loaded_skills if s.name != skill_name]
+        self._rebuild_system_prompt()
+        return True
+    
+    def clear_skills(self) -> None:
+        """Clear all loaded skills from the system prompt."""
+        self._loaded_skills = []
+        self._rebuild_system_prompt()
+    
+    def list_loaded_skills(self) -> List[str]:
+        """Get names of currently loaded skills."""
+        return [s.name for s in self._loaded_skills]
+    
+    def _rebuild_system_prompt(self) -> None:
+        """Rebuild system prompt with loaded skills."""
+        if not self._loaded_skills:
+            self.system_prompt = self.base_system_prompt
+            return
+        
+        parts = [self.base_system_prompt, "\n# Loaded Skills\n"]
+        
+        for skill in self._loaded_skills:
+            parts.append(f"\n## {skill.name}\n{skill.content}\n")
+        
+        self.system_prompt = "\n".join(parts)
+
     def get_messages(self) -> List[Dict[str, Any]]:
         """
         Get complete message list including system prompt for API calls.
@@ -103,15 +173,15 @@ class ContextManager:
 
     def set_system_prompt(self, prompt: str) -> None:
         """Set the system prompt."""
-        self.system_prompt = prompt
+        self.base_system_prompt = prompt
+        self._rebuild_system_prompt()
 
     def clear_history(self, keep_system: bool = True) -> None:
         """
         Clear conversation history.
 
         Args:
-            keep_system: If True, preserves system messages (not applicable since
-                        system prompt is stored separately)
+            keep_system: If True, preserves system context
         """
         self.conversation_history = []
 
@@ -126,7 +196,6 @@ class ContextManager:
 
         for message in self.conversation_history:
             # Count tokens for each message
-            # Based on OpenAI's token counting approach
             content = message.get("content", "")
             if content:
                 total_tokens += len(self.encoding.encode(content))
@@ -135,7 +204,6 @@ class ContextManager:
             tool_calls = message.get("tool_calls", [])
             if tool_calls:
                 for tool_call in tool_calls:
-                    # Count function name and arguments
                     function = tool_call.get("function", {})
                     name = function.get("name", "")
                     arguments = function.get("arguments", "")
@@ -158,16 +226,10 @@ class ContextManager:
     def compress_context(self) -> None:
         """
         Compress conversation history when token limit is exceeded.
-
-        Current implementation: Clear history (preserving system context)
-        Future: Implement intelligent summarization
         """
         token_count = self.count_tokens()
-
-        # Trigger compression
         self.clear_history()
 
-        # Trigger notification
         message = (
             f"Context compression triggered: cleared {token_count} tokens "
             f"(exceeded {self.max_tokens} threshold)"
@@ -211,16 +273,15 @@ class ContextManager:
 
         from kagent.llm.base import LLMResponse
 
-        summary_prompt = "Please summarize the following conversation history concisely while preserving key information:"
+        summary_prompt = "Please summarize the following conversation history concisely:"
         messages = [{"role": "system", "content": summary_prompt}]
         messages.extend(self.conversation_history)
 
         response: LLMResponse = await llm_client.complete(messages)
 
         if response.content:
-            summary = response.content
             self.clear_history()
-            self.add_message("assistant", f"Previous conversation summary: {summary}")
+            self.add_message("assistant", f"Previous conversation summary: {response.content}")
             return "History compressed successfully."
         else:
-            return "Failed to compress history: LLM returned empty response."
+            return "Failed to compress history."

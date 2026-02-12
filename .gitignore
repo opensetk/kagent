@@ -1,3 +1,5 @@
 .env
 workspace/*
 sessions/*
+.agent/skills/*
+.trae/*

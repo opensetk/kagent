@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 import json
 import os
 import time
@@ -185,10 +185,20 @@ class InteractionManager:
         self.hook_dispatcher.register("/delete", self.hook_delete_session)
         self.hook_dispatcher.register("/rename", self.hook_rename_session)
 
-    async def handle_request(self, text: str, session_id: str) -> str:
+    async def handle_request(
+        self, 
+        text: str, 
+        session_id: str,
+        on_tool_call: Optional[Callable[[str, Dict[str, Any], Any], None]] = None
+    ) -> str:
         """
         The main entry point for any channel.
         Processes the text for a specific session and returns the response.
+
+        Args:
+            text: User input text
+            session_id: Session identifier
+            on_tool_call: Optional callback for tool execution display
         """
         # Set current session if not set
         if self.current_session_id is None:
@@ -212,7 +222,7 @@ class InteractionManager:
 
         # 3. Process with Agent
         try:
-            response = await self.agent.chat(text)
+            response = await self.agent.chat(text, on_tool_call=on_tool_call)
             # 4. Auto-save after each message
             self._save_session(self.current_session_id)
             return response

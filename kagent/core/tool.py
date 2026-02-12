@@ -429,12 +429,18 @@ class ToolManager:
         tasks = [self.execute(call["tool_name"], call["arguments"]) for call in calls]
         return await asyncio.gather(*tasks)
 
-    async def execute_tool_calls(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
+    async def execute_tool_calls(
+        self, 
+        tool_calls: List[Any],
+        on_tool_executed: Optional[Callable[[str, Dict[str, Any], ToolResult], None]] = None
+    ) -> List[Dict[str, Any]]:
         """
         Execute tool calls from LLM responses and return formatted messages.
 
         Args:
             tool_calls: List of tool call objects (OpenAI or LLMToolCall format)
+            on_tool_executed: Optional callback function(tool_name, arguments, result) 
+                             called after each tool execution for display purposes
 
         Returns:
             List of tool result messages ready for conversation history
@@ -463,17 +469,9 @@ class ToolManager:
             # Execute the tool
             result: ToolResult = await self.execute(tool_name, arguments)
 
-            # Print tool execution for user visibility
-            print(f"\n[Tool: {tool_name}]")
-            print(f"Arguments: {json.dumps(arguments, ensure_ascii=False)}")
-            if result.success:
-                result_str = str(result.result)
-                display = (
-                    result_str[:200] + "..." if len(result_str) > 200 else result_str
-                )
-                print(f"Result: {display}")
-            else:
-                print(f"Error: {result.error}")
+            # Call callback if provided (for channel-specific display)
+            if on_tool_executed:
+                on_tool_executed(tool_name, arguments, result)
 
             # Create tool result message
             tool_messages.append(

@@ -28,6 +28,13 @@ class LarkChannel(BaseChannel):
 
         self.loop = asyncio.get_event_loop()
 
+    def on_tool_call(self, tool_name: str, arguments: Dict[str, Any], result: Any) -> None:
+        """
+        Override to suppress tool call display for Lark channel.
+        Lark channel does not show tool execution details to users.
+        """
+        pass  # Lark channel doesn't display tool calls in console
+
         # 1. 创建事件处理器
         self.event_handler = (
             lark.EventDispatcherHandler.builder(self.app_id, self.app_secret)

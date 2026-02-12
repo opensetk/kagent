@@ -5,10 +5,11 @@ This module provides the AgentLoop class which manages the conversation flow
 between user and LLM, handling tool calls and responses.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable, List
 
 from kagent.core.tool import ToolManager
 from kagent.core.context import ContextManager
+from kagent.core.skill import SkillManager
 from kagent.llm.client import LLMClient
 
 
@@ -26,6 +27,7 @@ class AgentLoop:
         llm_client: LLMClient,
         tool_manager: ToolManager,
         context_manager: Optional[ContextManager] = None,
+        skill_manager: Optional[SkillManager] = None,
         max_iterations: int = 100,
     ):
         """
@@ -35,29 +37,57 @@ class AgentLoop:
             llm_client: LLM client for API calls
             tool_manager: ToolManager instance for tool execution
             context_manager: Optional ContextManager (creates default if not provided)
+            skill_manager: Optional SkillManager for loading skills
             max_iterations: Maximum tool call iterations per user message
         """
         self.llm_client = llm_client
         self.tool_manager = tool_manager
-        self.context_manager = context_manager or ContextManager(model=llm_client.model)
         self.max_iterations = max_iterations
+        
+        # Initialize context manager
+        if context_manager:
+            self.context_manager = context_manager
+        else:
+            self.context_manager = ContextManager(
+                model=llm_client.model,
+                skill_manager=skill_manager,
+            )
 
     def set_system_prompt(self, prompt: str) -> None:
         """Set the system prompt for the agent"""
         self.context_manager.set_system_prompt(prompt)
 
-    async def chat(self, user_input: str) -> str:
+    def load_skill(self, skill_name: str) -> bool:
+        """
+        Load a skill into the current session.
+        
+        Args:
+            skill_name: Name of the skill to load
+            
+        Returns:
+            True if skill was loaded successfully
+        """
+        return self.context_manager.load_skill(skill_name)
+    
+    def unload_skill(self, skill_name: str) -> bool:
+        """Unload a skill from the current session."""
+        return self.context_manager.unload_skill(skill_name)
+    
+    def list_loaded_skills(self) -> List[str]:
+        """Get names of currently loaded skills."""
+        return self.context_manager.list_loaded_skills()
+
+    async def chat(
+        self, 
+        user_input: str,
+        on_tool_call: Optional[Callable[[str, Dict[str, Any], Any], None]] = None
+    ) -> str:
         """
         Process a single chat message with tool support.
 
-        This is the core conversation method that:
-        1. Adds user message to context
-        2. Calls LLM with available tools
-        3. Handles tool calls if present
-        4. Returns final assistant response
-
         Args:
             user_input: User's message
+            on_tool_call: Optional callback for tool execution display
 
         Returns:
             Assistant's response string
@@ -104,9 +134,10 @@ class AgentLoop:
                     tool_calls=tool_calls_data,
                 )
 
-                # Execute tools
+                # Execute tools with callback for display
                 tool_results = await self.tool_manager.execute_tool_calls(
-                    response.tool_calls
+                    response.tool_calls,
+                    on_tool_executed=on_tool_call
                 )
 
                 # Add tool results to conversation
