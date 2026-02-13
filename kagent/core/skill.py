@@ -31,9 +31,7 @@ class Skill:
     name: str
     description: str
     content: str
-    version: str = "1.0.0"
-    tags: List[str] = field(default_factory=list)
-    source_path: Optional[Path] = None
+    path: Optional[Path] = None
 
 
 class SkillManager:
@@ -76,6 +74,26 @@ class SkillManager:
         
         return loaded
     
+    def get_skill(self, name: str) -> Optional[Skill]:
+        """
+        Get a skill by name.
+        
+        Args:
+            name: Name of the skill
+            
+        Returns:
+            Skill instance if found, None otherwise
+        """
+        return self._skills.get(name)
+    
+    def list_skills(self) -> List[Skill]:
+        """List all loaded skills."""
+        return list(self._skills.values())
+    
+    def list_skill_names(self) -> List[str]:
+        """List names of all loaded skills."""
+        return list(self._skills.keys())
+    
     def _parse_skill_file(self, file_path: Path) -> Optional[Skill]:
         """Parse a SKILL.md file with YAML frontmatter."""
         content = file_path.read_text(encoding="utf-8")
@@ -91,7 +109,7 @@ class SkillManager:
                 name=name,
                 description=f"Skill from {name}",
                 content=content.strip(),
-                source_path=file_path,
+                path=file_path.parent,
             )
         
         try:
@@ -106,23 +124,6 @@ class SkillManager:
         return Skill(
             name=name,
             description=frontmatter.get("description", "No description"),
-            version=frontmatter.get("version", "1.0.0"),
-            tags=frontmatter.get("tags", []),
             content=markdown_content,
-            source_path=file_path,
+            path=file_path.parent,
         )
-    
-    def get_skill(self, name: str) -> Optional[Skill]:
-        """Get a skill by name."""
-        return self._skills.get(name)
-    
-    def list_skills(self) -> List[Skill]:
-        """List all loaded skills."""
-        return list(self._skills.values())
-    
-    def activate_skill(self, name: str) -> bool:
-        """
-        Mark a skill as active. Currently just validates the skill exists.
-        Actual loading happens in ContextManager.load_skill().
-        """
-        return name in self._skills

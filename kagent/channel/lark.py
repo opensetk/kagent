@@ -162,7 +162,10 @@ class LarkChannel(BaseChannel):
         self, data: lark.im.v1.P2ImMessageReceiveV1
     ) -> None:
         """内部方法：同步桥接异步处理"""
-        asyncio.run_coroutine_threadsafe(self._async_handle_message(data), self.loop)
+        if self.loop.is_running():
+            asyncio.ensure_future(self._async_handle_message(data))
+        else:
+            asyncio.run(self._async_handle_message(data))
 
     async def _async_handle_message(
         self, data: lark.im.v1.P2ImMessageReceiveV1
@@ -206,7 +209,10 @@ class LarkChannel(BaseChannel):
         self, data: lark.im.v1.P2ImChatMemberBotAddedV1
     ) -> None:
         """同步桥接异步处理"""
-        asyncio.run_coroutine_threadsafe(self._async_handle_bot_added(data), self.loop)
+        if self.loop.is_running():
+            asyncio.ensure_future(self._async_handle_bot_added(data))
+        else:
+            asyncio.run(self._async_handle_bot_added(data))
 
     async def _async_handle_bot_added(
         self, data: lark.im.v1.P2ImChatMemberBotAddedV1

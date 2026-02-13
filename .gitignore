@@ -3,3 +3,5 @@ workspace/*
 sessions/*
 .agent/skills/*
 .trae/*
+.agent/awesome-claude-skills/*
+.npm-cache/*

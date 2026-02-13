@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kagent.core.agent import AgentLoop
+from kagent.core.context import AgentRuntime, Context
 from kagent.core.skill import SkillManager
 from kagent.interaction.manager import InteractionManager
 from kagent.channel.shell import ShellChannel
@@ -32,17 +33,32 @@ def test_shell_integration():
 
     # 2. Core Layer (Agent)
     # Agent receives the tool_manager for executing tools
-    llm_client = LLMClient.from_env("openai", model="deepseek-ai/DeepSeek-V3.2")
-    agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager)
-    agent.set_system_prompt(
-        "You are a helpful AI assistant with access to tools for file operations "
-        "and command execution. Use tools when appropriate to help the user. "
-        "Always show the tool name, arguments, and results to the user."
+    llm_client = LLMClient.from_env("openai", model="longcat-flash-lite")
+    
+    # Create SkillManager to load all skills
+    skill_manager = SkillManager()
+    print(f"✅ Loaded {len(skill_manager.list_skills())} skills from .agent/skills/")
+    
+    # Create runtime and context for the agent
+    runtime = AgentRuntime()
+    context = Context(
+        runtime=runtime,
+        model=llm_client.model,
+        llm_client=llm_client,
+        skill_manager=skill_manager,
+    )
+
+    
+    agent = AgentLoop(
+        llm_client=llm_client,
+        tool_manager=tool_manager,
+        context=context,
+        skill_manager=skill_manager,
     )
 
     # 4. Interaction Layer (Manager)
     # Manages session storage and hooks, delegates tool execution to Agent
-    manager = InteractionManager(agent=agent)
+    manager = InteractionManager(agent=agent, model=llm_client.model)
 
     # 5. Channel Layer (Shell)
     shell_channel = ShellChannel(session_id="test-session")

@@ -15,4 +15,3 @@ from . import write
 from . import edit
 from . import glob
 from . import grep
-from . import skill_tool

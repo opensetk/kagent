@@ -13,7 +13,7 @@ class HookDispatcher:
         self.hooks[hook_name.lower()] = handler
 
     async def dispatch(
-        self, text: str, context: Optional[Dict[str, Any]] = None
+        self, text: str, hook_context: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
         """
         Check if text is a hook and dispatch it.
@@ -34,20 +34,17 @@ class HookDispatcher:
         handler = self.hooks[hook_name]
 
         try:
-            # Prepare arguments based on handler signature
             sig = inspect.signature(handler)
             params = sig.parameters
 
             kwargs = {}
-            if "context" in params:
-                kwargs["context"] = context
+            if "hook_context" in params:
+                kwargs["hook_context"] = hook_context
 
-            # Check if handler accepts *args
             has_var_positional = any(
                 p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values()
             )
 
-            # Handle both sync and async handlers
             if inspect.iscoroutinefunction(handler):
                 if has_var_positional:
                     result = await handler(*args, **kwargs)

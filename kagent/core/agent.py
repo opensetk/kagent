@@ -8,8 +8,9 @@ between user and LLM, handling tool calls and responses.
 from typing import Dict, Any, Optional, Callable, List
 
 from kagent.core.tool import ToolManager
-from kagent.core.context import ContextManager
-from kagent.core.skill import SkillManager
+from kagent.core.context import AgentRuntime, ContextManager, Context
+from kagent.core.skill import SkillManager, Skill
+from kagent.core.config import load_config
 from kagent.llm.client import LLMClient
 
 
@@ -19,14 +20,14 @@ class AgentLoop:
 
     This class manages the conversation with LLM and coordinates tool execution
     through the ToolManager. It delegates LLM calls to LLMClient and context
-    management to ContextManager.
+    management to Context.
     """
 
     def __init__(
         self,
         llm_client: LLMClient,
         tool_manager: ToolManager,
-        context_manager: Optional[ContextManager] = None,
+        context: Optional[ContextManager] = None,
         skill_manager: Optional[SkillManager] = None,
         max_iterations: int = 100,
     ):
@@ -36,47 +37,37 @@ class AgentLoop:
         Args:
             llm_client: LLM client for API calls
             tool_manager: ToolManager instance for tool execution
-            context_manager: Optional ContextManager (creates default if not provided)
+            context: Optional Context instance (creates default if not provided)
             skill_manager: Optional SkillManager for loading skills
             max_iterations: Maximum tool call iterations per user message
         """
         self.llm_client = llm_client
         self.tool_manager = tool_manager
         self.max_iterations = max_iterations
+        self.skill_manager = skill_manager
         
-        # Initialize context manager
-        if context_manager:
-            self.context_manager = context_manager
+        # Initialize context
+        if context:
+            self.context = context
         else:
-            self.context_manager = ContextManager(
-                model=llm_client.model,
-                skill_manager=skill_manager,
+            # Create default runtime and context
+            config = load_config()
+            runtime = AgentRuntime(
+                max_tokens=config.max_tokens,
+                ratio_of_compress=config.ratio_of_compress,
+                keep_last_n_messages=config.keep_last_n_messages,
+                work_dir=config.work_dir,
             )
-
-    def set_system_prompt(self, prompt: str) -> None:
-        """Set the system prompt for the agent"""
-        self.context_manager.set_system_prompt(prompt)
-
-    def load_skill(self, skill_name: str) -> bool:
-        """
-        Load a skill into the current session.
-        
-        Args:
-            skill_name: Name of the skill to load
-            
-        Returns:
-            True if skill was loaded successfully
-        """
-        return self.context_manager.load_skill(skill_name)
-    
-    def unload_skill(self, skill_name: str) -> bool:
-        """Unload a skill from the current session."""
-        return self.context_manager.unload_skill(skill_name)
-    
-    def list_loaded_skills(self) -> List[str]:
-        """Get names of currently loaded skills."""
-        return self.context_manager.list_loaded_skills()
-
+            self.context = ContextManager(
+                runtime=runtime,
+                model=llm_client.model,
+                llm_client=llm_client,
+                skill_manager=self.skill_manager,
+            )
+            print(f"[ContextManager] System prompt loaded ({len(runtime.system_prompt)} chars):")
+            print("-" * 40)
+            print(runtime.system_prompt[:500] + "..." if len(runtime.system_prompt) > 500 else runtime.system_prompt)
+            print("-" * 40)
     async def chat(
         self, 
         user_input: str,
@@ -92,14 +83,14 @@ class AgentLoop:
         Returns:
             Assistant's response string
         """
-        self.context_manager.add_message("user", user_input)
+        self.context.add_message("user", user_input)
 
         iteration = 0
         while iteration < self.max_iterations:
             iteration += 1
 
             # Get messages for API call
-            messages = self.context_manager.get_messages()
+            messages = self.context.get_messages()
 
             # Get available tools
             tools = self.tool_manager.get_openai_tools() if self.tool_manager else None
@@ -109,7 +100,7 @@ class AgentLoop:
 
             if not response or not response.content and not response.tool_calls:
                 error_msg = "Error: Failed to get response from LLM"
-                self.context_manager.add_message("assistant", error_msg)
+                self.context.add_message("assistant", error_msg)
                 return error_msg
 
             # Check if there are tool calls
@@ -128,7 +119,7 @@ class AgentLoop:
                 ]
 
                 # Add assistant message with tool calls to history
-                self.context_manager.add_message(
+                self.context.add_message(
                     "assistant",
                     response.content or "",
                     tool_calls=tool_calls_data,
@@ -142,7 +133,7 @@ class AgentLoop:
 
                 # Add tool results to conversation
                 for tool_result in tool_results:
-                    self.context_manager.add_message(
+                    self.context.add_message(
                         tool_result["role"],
                         tool_result["content"],
                         tool_call_id=tool_result.get("tool_call_id"),
@@ -154,10 +145,10 @@ class AgentLoop:
             else:
                 # No tool calls, we have a final response
                 response_content = response.content or "No response generated"
-                self.context_manager.add_message("assistant", response_content)
+                self.context.add_message("assistant", response_content)
                 return response_content
 
         # Max iterations reached
         max_iter_msg = "Error: Maximum tool iteration limit reached"
-        self.context_manager.add_message("assistant", max_iter_msg)
+        self.context.add_message("assistant", max_iter_msg)
         return max_iter_msg
