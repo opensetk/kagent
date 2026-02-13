@@ -27,15 +27,8 @@ class LarkChannel(BaseChannel):
             )
 
         self.loop = asyncio.get_event_loop()
-
-    def on_tool_call(self, tool_name: str, arguments: Dict[str, Any], result: Any) -> None:
-        """
-        Override to suppress tool call display for Lark channel.
-        Lark channel does not show tool execution details to users.
-        """
-        pass  # Lark channel doesn't display tool calls in console
-
-        # 1. 创建事件处理器
+        
+        # 创建事件处理器
         self.event_handler = (
             lark.EventDispatcherHandler.builder(self.app_id, self.app_secret)
             .register_p2_im_message_receive_v1(self._do_p2_im_message_receive_v1)
@@ -45,13 +38,20 @@ class LarkChannel(BaseChannel):
             .build()
         )
 
-        # 2. 创建长连接客户端
+        # 创建长连接客户端
         self.ws_client = lark.ws.Client(
             self.app_id,
             self.app_secret,
             event_handler=self.event_handler,
             log_level=lark.LogLevel.DEBUG,
         )
+
+    def on_tool_call(self, tool_name: str, arguments: Dict[str, Any], result: Any) -> None:
+        """
+        Override to suppress tool call display for Lark channel.
+        Lark channel does not show tool call details to users.
+        """
+        pass
 
     async def get_tenant_access_token(self) -> str:
         """异步获取 tenant_access_token"""

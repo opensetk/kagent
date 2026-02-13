@@ -23,7 +23,6 @@ def main():
     tool_manager = ToolManager()
     llm_client = LLMClient.from_env("openai", model="LongCat-Flash-Lite")
     agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager)
-    agent.set_system_prompt("You are a helpful AI assistant. Answer concisely.")
 
     # 2. 交互管理层 (Interaction Manager - 处理 Session, 历史, 指令)
     # 初始化时自动加载最新 session
