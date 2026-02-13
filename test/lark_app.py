@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kagent.core.agent import AgentLoop
+from kagent.core.skill import SkillManager
 from kagent.interaction.manager import InteractionManager
 from kagent.channel.lark import LarkChannel
 from kagent.app.main_app import AgentApp
@@ -21,8 +22,10 @@ def main():
     from kagent.llm.client import LLMClient
 
     tool_manager = ToolManager()
+    skill_manager = SkillManager()
+    
     llm_client = LLMClient.from_env("openai", model="LongCat-Flash-Lite")
-    agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager)
+    agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager, skill_manager=skill_manager)    
 
     # 2. 交互管理层 (Interaction Manager - 处理 Session, 历史, 指令)
     # 初始化时自动加载最新 session

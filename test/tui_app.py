@@ -9,6 +9,7 @@ from kagent.core.agent import AgentLoop
 from kagent.interaction.manager import InteractionManager
 from kagent.channel.tui import TUIChannel
 from kagent.app.main_app import AgentApp
+from kagent.core.skill import SkillManager
 
 load_dotenv()
 
@@ -25,11 +26,10 @@ def test_tui_integration():
     from kagent.llm.client import LLMClient
 
     tool_manager = ToolManager()
+    skill_manager = SkillManager()
+    
     llm_client = LLMClient.from_env("openai", model="LongCat-Flash-Lite")
-    agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager)
-    agent.set_system_prompt(
-        "You are a helpful assistant. Keep your answers very short."
-    )
+    agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager, skill_manager=skill_manager)
 
     # 2. Interaction Layer (Manager)
     manager = InteractionManager(agent=agent)

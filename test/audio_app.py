@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kagent.core.agent import AgentLoop
+from kagent.core.skill import SkillManager
 from kagent.interaction.manager import InteractionManager
 from kagent.channel.audio import AudioChannel
 from kagent.app.main_app import AgentApp
@@ -25,13 +26,14 @@ def test_audio_integration():
     from kagent.llm.client import LLMClient
 
     tool_manager = ToolManager()
+    skill_manager = SkillManager()
     
     # Use environment variables for LLM configuration
     provider = os.getenv("LLM_PROVIDER", "openai")
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     
     llm_client = LLMClient.from_env(provider, model=model)
-    agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager)
+    agent = AgentLoop(llm_client=llm_client, tool_manager=tool_manager, skill_manager=skill_manager)
     agent.set_system_prompt(
         "You are a helpful AI assistant. Answer concisely and helpfully."
     )
