@@ -1,5 +1,49 @@
 import inspect
-from typing import Dict, Any, Callable, Optional, Awaitable
+from dataclasses import dataclass, field
+from typing import Dict, Any, Callable, Optional, Awaitable, List
+from enum import Enum
+
+from kagent.core import AgentRuntime
+
+
+class HookAction(Enum):
+    NONE = "none"
+    SWITCH_SESSION = "switch_session"
+    REFRESH_SESSIONS = "refresh_sessions"
+
+
+@dataclass
+class HookResult:
+    message: str
+    action: HookAction = HookAction.NONE
+    action_data: Dict[str, Any] = field(default_factory=dict)
+
+    def __str__(self) -> str:
+        return self.message
+
+    @classmethod
+    def ok(cls, message: str) -> "HookResult":
+        return cls(message=message)
+
+    @classmethod
+    def error(cls, message: str) -> "HookResult":
+        return cls(message=message)
+
+    @classmethod
+    def switch_session(cls, message: str, session_id: str) -> "HookResult":
+        return cls(
+            message=message,
+            action=HookAction.SWITCH_SESSION,
+            action_data={"session_id": session_id}
+        )
+
+    @classmethod
+    def refresh_sessions(cls, message: str, new_session_id: Optional[str] = None) -> "HookResult":
+        return cls(
+            message=message,
+            action=HookAction.REFRESH_SESSIONS,
+            action_data={"new_session_id": new_session_id}
+        )
 
 
 class HookDispatcher:
@@ -13,11 +57,11 @@ class HookDispatcher:
         self.hooks[hook_name.lower()] = handler
 
     async def dispatch(
-        self, text: str, hook_context: Optional[Dict[str, Any]] = None
-    ) -> Optional[str]:
+        self, text: str, runtime: AgentRuntime
+    ) -> Optional[HookResult]:
         """
         Check if text is a hook and dispatch it.
-        Returns the result string if it was a hook, None otherwise.
+        Returns HookResult if it was a hook, None otherwise.
         """
         text = text.strip()
         if not text.startswith("/"):
@@ -29,37 +73,18 @@ class HookDispatcher:
 
         if hook_name not in self.hooks:
             supported = ", ".join(self.hooks.keys())
-            return f"Unknown hook: {hook_name}. Supported: {supported}"
+            return HookResult.error(f"Unknown hook: {hook_name}. Supported: {supported}")
 
         handler = self.hooks[hook_name]
 
         try:
-            sig = inspect.signature(handler)
-            params = sig.parameters
-
-            kwargs = {}
-            if "hook_context" in params:
-                kwargs["hook_context"] = hook_context
-
-            has_var_positional = any(
-                p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values()
-            )
-
             if inspect.iscoroutinefunction(handler):
-                if has_var_positional:
-                    result = await handler(*args, **kwargs)
-                elif args and "filename" in params:
-                    result = await handler(args[0], **kwargs)
-                else:
-                    result = await handler(**kwargs)
+                result = await handler(*args, runtime=runtime)
             else:
-                if has_var_positional:
-                    result = handler(*args, **kwargs)
-                elif args and "filename" in params:
-                    result = handler(args[0], **kwargs)
-                else:
-                    result = handler(**kwargs)
+                result = handler(*args, runtime=runtime)
 
-            return str(result)
+            if isinstance(result, HookResult):
+                return result
+            return HookResult.ok(str(result))
         except Exception as e:
-            return f"Error executing hook {hook_name}: {str(e)}"
+            return HookResult.error(f"Error executing hook {hook_name}: {str(e)}")

@@ -1,10 +1,10 @@
-from kagent.core.agent import AgentLoop
+from kagent.core.agent import Agent, AgentConfig
 from kagent.core.tool import ToolManager, tool
-from kagent.core.context import AgentRuntime, ContextManager, Context
-from kagent.core.config import AgentConfig, load_config
+from kagent.core.context import AgentRuntime, ContextManager
+from kagent.core.skill import SkillLibrary, Skill
 
 __all__ = [
-    "AgentLoop",
+    "Agent",
     "ToolManager",
     "tool",
     "AgentRuntime",
@@ -12,4 +12,6 @@ __all__ = [
     "ContextManager",
     "AgentConfig",
     "load_config",
+    "SkillLibrary",
+    "Skill",
 ]

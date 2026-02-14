@@ -3,11 +3,33 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+import asyncio
+from dataclasses import dataclass, field
 
-from kagent.core.agent import AgentLoop
-from kagent.core.context import AgentRuntime, ContextManager
-from kagent.core.config import load_config
-from kagent.interaction.hook import HookDispatcher
+from kagent.core import Agent, AgentRuntime, ContextManager
+from kagent.interaction.hook import HookDispatcher, HookResult, HookAction
+
+
+@dataclass
+class HandleResult:
+    message: str
+    action: HookAction = HookAction.NONE
+    action_data: Dict[str, Any] = field(default_factory=dict)
+
+    def __str__(self) -> str:
+        return self.message
+
+    @classmethod
+    def from_hook_result(cls, hook_result: HookResult) -> "HandleResult":
+        return cls(
+            message=hook_result.message,
+            action=hook_result.action,
+            action_data=hook_result.action_data,
+        )
+
+    @classmethod
+    def response(cls, message: str) -> "HandleResult":
+        return cls(message=message)
 
 
 class InteractionManager:
@@ -17,176 +39,34 @@ class InteractionManager:
 
     Core Principles:
     - AgentRuntime: Pure data (session state) - one per session
-    - ContextManager: Operations on runtime - one per AgentLoop
-    - InteractionManager: Manages session switching by swapping runtimes
-    
-    Session Switching:
-    - Each session has its own AgentRuntime
-    - Switching sessions = swapping the runtime in ContextManager
-    - ContextManager itself remains unchanged
+    - ContextManager: Operations on runtime - shared by all sessions
+    - InteractionManager: Manages sessions but does not track "current" session
+    - Each request explicitly provides the session_id and runtime
     """
 
-    def __init__(
-        self,
-        agent: AgentLoop,
-        sessions_dir: str = "sessions",
-        model: str = "gpt-4o",
-    ):
-        self.agent = agent
-        self.model = model
-        self.hook_dispatcher = HookDispatcher()
-        self.sessions_dir = Path(sessions_dir)
-        self.sessions_dir.mkdir(exist_ok=True)
-
-        self.current_session_id: Optional[str] = None
-
-        self.session_metadata: Dict[str, Dict[str, Any]] = {}
-
-        self._runtimes: Dict[str, AgentRuntime] = {}
-
+    def __init__(self, sessions_dir: str = ".agent/sessions"):
+        self.sessions_dir = sessions_dir
+        self.available_sessions: Dict[str, AgentRuntime] = {}
+        self.agent: Optional[Agent] = None
         self._load_all_sessions()
-
+        self.hook_dispatcher = HookDispatcher()
         self._register_hooks()
 
-    def _load_all_sessions(self) -> None:
-        """Load all existing session files from sessions directory."""
-        if not self.sessions_dir.exists():
+    def _load_all_sessions(self):
+        """Load all available sessions from disk."""
+        sessions_path = Path(self.sessions_dir)
+        if not sessions_path.exists():
+            sessions_path.mkdir(parents=True, exist_ok=True)
             return
 
-        for session_file in self.sessions_dir.glob("*.json"):
+        for session_file in sessions_path.glob("*.json"):
+            session_id = session_file.stem
             try:
-                with open(session_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    session_id = data.get("session_id")
-                    if session_id:
-                        self.session_metadata[session_id] = {
-                            "name": data.get("name", session_id),
-                            "created_at": data.get("created_at", ""),
-                            "last_active": data.get("last_active", ""),
-                        }
+                runtime = AgentRuntime.load_from_file(session_id, self.sessions_dir)
+                if runtime:
+                    self.available_sessions[session_id] = runtime
             except Exception as e:
-                print(f"Warning: Failed to load session file {session_file}: {e}")
-
-        # Find session with latest last_active
-        latest_session = max(
-            self.session_metadata.items(),
-            key=lambda x: x[1].get("last_active", ""),
-            default=(None, None),
-        )
-        session_id, metadata = latest_session
-        if not session_id:
-            return None
-
-        if self._load_session(session_id):
-            self.current_session_id = session_id
-            name = metadata.get("name", session_id)
-            print(f"Loaded latest session: {name}")
-            return session_id
-        return None
-
-    def _save_session(self, session_id: str) -> bool:
-        """
-        Save session to disk.
-
-        Args:
-            session_id: Session identifier
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            metadata = self.session_metadata.get(session_id, {})
-            
-            # Get runtime data from agent's context
-            runtime_data = self.agent.context.runtime.to_dict()
-            
-            session_data = {
-                "session_id": session_id,
-                "name": metadata.get("name", session_id),
-                "created_at": metadata.get("created_at", datetime.now().isoformat()),
-                "last_active": datetime.now().isoformat(),
-                "runtime": runtime_data,
-            }
-
-            session_file = self.sessions_dir / f"{session_id}.json"
-            with open(session_file, "w", encoding="utf-8") as f:
-                json.dump(session_data, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as e:
-            print(f"Error saving session {session_id}: {e}")
-            return False
-
-    def _load_session(self, session_id: str) -> bool:
-        """
-        Load session from disk and switch to its runtime.
-
-        Args:
-            session_id: Session identifier
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            session_file = self.sessions_dir / f"{session_id}.json"
-            if not session_file.exists():
-                return False
-
-            with open(session_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            self.session_metadata[session_id] = {
-                "name": data.get("name", session_id),
-                "created_at": data.get("created_at", datetime.now().isoformat()),
-                "last_active": data.get("last_active", ""),
-            }
-
-            runtime_data = data.get("runtime", {})
-            if runtime_data:
-                runtime = AgentRuntime.from_dict(runtime_data)
-                runtime.session_id = session_id
-            else:
-                config = load_config()
-                runtime = AgentRuntime(
-                    session_id=session_id,
-                    work_dir=config.work_dir,
-                    max_tokens=config.max_tokens,
-                    ratio_of_compress=config.ratio_of_compress,
-                    keep_last_n_messages=config.keep_last_n_messages,
-                )
-            
-            self._runtimes[session_id] = runtime
-            
-            self.agent.context.update_runtime(runtime)
-
-            return True
-        except Exception as e:
-            print(f"Error loading session {session_id}: {e}")
-            return False
-
-    def _generate_session_id(self) -> str:
-        """Generate a unique session ID based on timestamp."""
-        return datetime.now().strftime("%Y%m%d-%H%M%S")
-
-    def _resolve_session_name(self, name: str) -> Optional[str]:
-        """
-        Resolve session name to session ID.
-
-        Args:
-            name: Session name or ID
-
-        Returns:
-            Session ID if found, None otherwise
-        """
-        # First check if it's already a session ID
-        if name in self.session_metadata:
-            return name
-
-        # Search by name
-        for session_id, metadata in self.session_metadata.items():
-            if metadata.get("name") == name:
-                return session_id
-
-        return None
+                print(f"Failed to load session {session_id}: {e}")
 
     def _register_hooks(self):
         """Register interaction-level hooks."""
@@ -195,325 +75,313 @@ class InteractionManager:
         self.hook_dispatcher.register("/save", self.hook_save_session)
         self.hook_dispatcher.register("/history", self.hook_show_history)
         self.hook_dispatcher.register("/tools", self.hook_list_tools)
-
-        # New session management hooks
         self.hook_dispatcher.register("/new", self.hook_new_session)
         self.hook_dispatcher.register("/switch", self.hook_switch_session)
         self.hook_dispatcher.register("/list", self.hook_list_sessions)
         self.hook_dispatcher.register("/delete", self.hook_delete_session)
         self.hook_dispatcher.register("/rename", self.hook_rename_session)
+        self.hook_dispatcher.register("/help", self.hook_help)
+
+    def set_agent(self, agent: Agent):
+        """Set the agent instance."""
+        self.agent = agent
 
     async def handle_request(
-        self, 
-        text: str, 
+        self,
+        text: str,
         session_id: str,
-        on_tool_call: Optional[Callable[[str, Dict[str, Any], Any], None]] = None
-    ) -> str:
+    ) -> HandleResult:
         """
         The main entry point for any channel.
         Processes the text for a specific session and returns the response.
-
-        Args:
-            text: User input text
-            session_id: Session identifier
-            on_tool_call: Optional callback for tool execution display
         """
-        # Set current session if not set
-        if self.current_session_id is None:
-            self.current_session_id = session_id
-            if session_id not in self.session_metadata:
-                # Create new session if it doesn't exist
-                self.session_metadata[session_id] = {
-                    "name": session_id,
-                    "created_at": datetime.now().isoformat(),
-                    "last_active": "",
-                }
-                # Initialize runtime for new session
-                self.agent.context.runtime.session_id = session_id
+        if self.agent is None:
+            return HandleResult.response("Error: Agent not set. Please call set_agent() first.")
 
-        # 1. Dispatch hooks with session context
-        hook_result = await self.hook_dispatcher.dispatch(text, hook_context={"session_id": session_id})
+        runtime = self._get_or_create_runtime(session_id)
+
+        hook_result = await self.hook_dispatcher.dispatch(text, runtime)
         if hook_result is not None:
-            return hook_result
+            self._save_runtime(runtime)
+            return HandleResult.from_hook_result(hook_result)
 
-        # 2. Process with Agent
         try:
-            response = await self.agent.chat(text, on_tool_call=on_tool_call)
-            # 3. Auto-save after each message
-            self._save_session(self.current_session_id)
-            return response
+            response = await self.agent.chat(
+                runtime=runtime,
+                user_input=text,
+            )
+            self._save_runtime(runtime)
+            return HandleResult.response(response)
         except Exception as e:
-            return f"Agent error: {str(e)}"
+            return HandleResult.response(f"Agent error: {str(e)}")
 
-    # Hook Handlers
+    def _get_or_create_runtime(self, session_id: str) -> AgentRuntime:
+        """Get existing runtime or create new one for the session."""
+        if session_id in self.available_sessions:
+            return self.available_sessions[session_id]
 
-    async def hook_clear_session(self, hook_context: Dict[str, Any]) -> str:
-        session_id = hook_context.get("session_id")
-        if session_id:
-            self.agent.context.clear_history()
-            self._save_session(session_id)
-            return "Session history cleared."
-        return "No active session."
+        # Create new session
+        runtime = self.agent.new_session(session_id)
+        self.available_sessions[session_id] = runtime
+        return runtime
 
-    async def hook_compress_session(self, hook_context: Dict[str, Any]) -> str:
-        session_id = hook_context.get("session_id")
-        if not session_id:
-            return "No active session."
-
-        history = self.agent.context.get_history()
-        if not history:
-            return "History is empty, nothing to compress."
-
-        result = self.agent.context.compress_context()
-        self._save_session(session_id)
-        return result
-
-    def hook_save_session(
-        self, filename: str = "history.json", hook_context: Optional[Dict[str, Any]] = None
-    ) -> str:
-        if hook_context is None:
-            hook_context = {}
-        session_id = hook_context.get("session_id")
-        if not session_id:
-            return "Error: No session ID provided."
-
-        history = self.agent.context.get_history()
+    def _save_runtime(self, runtime: AgentRuntime):
+        """Save runtime to file."""
         try:
-            dir_path = os.path.dirname(os.path.abspath(filename))
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-            return f"History for session {session_id} saved to {filename}."
+            runtime.save_to_file(self.sessions_dir)
         except Exception as e:
-            return f"Failed to save history: {str(e)}"
+            print(f"Failed to save session {runtime.session_id}: {e}")
 
-    def hook_show_history(self, hook_context: Dict[str, Any]) -> str:
-        session_id = hook_context.get("session_id")
-        if not session_id:
-            return "Error: No session ID provided."
+    def _generate_session_id(self) -> str:
+        """Generate a unique session ID."""
+        return f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
-        history = self.agent.context.get_history()
-        if not history:
-            return "No history in this session."
+    # ==================== Hook Handlers ====================
 
-        summary = [
-            f"{m.get('role', 'unknown').upper()}: {m.get('content', '')[:50]}..."
-            for m in history
-        ]
-        return "Recent History:\n" + "\n".join(summary)
+    async def hook_new_session(self, *args, **kwargs) -> HookResult:
+        """Create a new session."""
+        runtime = kwargs.get("runtime")
+        session_name = args[0] if args else None
 
-    def hook_list_tools(self, hook_context: Optional[Dict[str, Any]] = None) -> str:
-        if not self.agent.tool_manager:
-            return "No tools available."
-
-        tools = self.agent.tool_manager.list_tools()
-        if not tools:
-            return "No tools available."
-
-        lines = ["Available Tools:"]
-        for tool in tools:
-            lines.append(f"\n  • {tool.name}")
-            lines.append(f"    {tool.description}")
-
-        return "\n".join(lines)
-
-    def hook_new_session(self, *args, hook_context: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Create a new session.
-        Usage: /new [name]
-        If name is not provided, generates one automatically.
-        """
-        session_id = self._generate_session_id()
-
-        if args:
-            base_name = args[0]
-            name = self._resolve_duplicate_name(base_name)
+        if session_name:
+            session_id = session_name
         else:
-            name = f"session-{session_id}"
+            session_id = self._generate_session_id()
 
-        self.session_metadata[session_id] = {
-            "name": name,
-            "created_at": datetime.now().isoformat(),
-            "last_active": "",
-        }
+        if session_id in self.available_sessions:
+            return HookResult.error(f"❌ Session '{session_id}' already exists.")
 
-        if self.current_session_id:
-            self._save_session(self.current_session_id)
+        if runtime:
+            self._save_runtime(runtime)
 
-        config = load_config()
-        
-        # 继承当前 session 的 skills
-        current_skills = self.agent.context.get_loaded_skills()
-        
-        runtime = AgentRuntime(
-            session_id=session_id,
-            work_dir=config.work_dir,
-            max_tokens=config.max_tokens,
-            ratio_of_compress=config.ratio_of_compress,
-            keep_last_n_messages=config.keep_last_n_messages,
-            loaded_skills=current_skills,  # 继承 skills
+        new_runtime = self.agent.new_session(session_id)
+        self.available_sessions[session_id] = new_runtime
+        self._save_runtime(new_runtime)
+
+        return HookResult.switch_session(
+            f"✅ New session created: {session_id}",
+            session_id
         )
-        
-        self._runtimes[session_id] = runtime
-        self.agent.context.update_runtime(runtime)
 
-        self.current_session_id = session_id
+    async def hook_switch_session(self, *args, **kwargs) -> HookResult:
+        """Switch to an existing session."""
+        runtime = kwargs.get("runtime")
 
-        self._save_session(session_id)
-
-        return f"Created new session: {name} (ID: {session_id})"
-
-    def _resolve_duplicate_name(self, base_name: str) -> str:
-        """Resolve name conflicts by appending -1, -2, etc."""
-        existing_names = {m.get("name") for m in self.session_metadata.values()}
-
-        if base_name not in existing_names:
-            return base_name
-
-        # Find next available suffix
-        counter = 1
-        while f"{base_name}-{counter}" in existing_names:
-            counter += 1
-
-        return f"{base_name}-{counter}"
-
-    def hook_switch_session(
-        self, *args, hook_context: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        Switch to a different session.
-        Usage: /switch <name_or_id>
-        """
         if not args:
-            return "Usage: /switch <session_name_or_id>"
+            return HookResult.error("Usage: /switch <session_id>")
 
-        target = args[0]
-        session_id = self._resolve_session_name(target)
+        session_id = args[0]
 
-        if not session_id:
-            return f"Session '{target}' not found. Use /list to see available sessions."
+        if session_id not in self.available_sessions:
+            available = ", ".join(self.available_sessions.keys())
+            return HookResult.error(f"❌ Session '{session_id}' not found. Available: {available}")
 
-        if self.current_session_id:
-            self._save_session(self.current_session_id)
+        if runtime:
+            self._save_runtime(runtime)
 
-        if self._load_session(session_id):
-            self.current_session_id = session_id
-            metadata = self.session_metadata.get(session_id, {})
-            return f"Switched to session: {metadata.get('name', session_id)}"
-        else:
-            return f"Failed to load session: {target}"
-
-    def hook_list_sessions(self, hook_context: Optional[Dict[str, Any]] = None) -> str:
-        """
-        List all sessions with metadata in Markdown table format.
-        Shows: name, message count, creation time, last active time.
-        """
-        if not self.session_metadata:
-            return "No sessions available. Create one with /new [name]"
-
-        lines = ["**Available Sessions:**", ""]
-        # Markdown table header
-        lines.append("| Name | Messages | Created | Last Active |")
-        lines.append("|------|----------|---------|-------------|")
-
-        # Sort sessions by last_active (most recent first)
-        sorted_sessions = sorted(
-            self.session_metadata.items(),
-            key=lambda x: x[1].get("last_active", ""),
-            reverse=True,
+        return HookResult.switch_session(
+            f"✅ Switched to session: {session_id}",
+            session_id
         )
 
-        for session_id, metadata in sorted_sessions:
-            name = metadata.get("name", session_id)
-            # Mark current session with asterisk
-            if session_id == self.current_session_id:
-                name = f"**{name}** *"
+    async def hook_list_sessions(self, *args, **kwargs) -> HookResult:
+        """List all sessions."""
+        if not self.available_sessions:
+            return HookResult.ok("No sessions available. Use /new to create one.")
 
-            created = metadata.get("created_at", "")[:10]  # Just the date part
-            last_active = metadata.get("last_active", "")[:16]  # Date + time
+        lines = ["📋 Available Sessions:"]
+        for idx, (sid, rt) in enumerate(self.available_sessions.items(), 1):
+            created = rt.created_at[:19] if rt.created_at else "Unknown"
+            lines.append(f"  {idx}. {sid} (created: {created})")
 
-            # Get message count from current context's runtime
-            if session_id == self.current_session_id:
-                msg_count = len(self.agent.context.get_history())
+        return HookResult.ok("\n".join(lines))
+
+    async def hook_delete_session(self, *args, **kwargs) -> HookResult:
+        """Delete a session."""
+        runtime = kwargs.get("runtime")
+        current_session_id = runtime.session_id if runtime else None
+
+        if not args:
+            return HookResult.error("Usage: /delete <session_id>")
+
+        session_id = args[0]
+
+        if session_id not in self.available_sessions:
+            return HookResult.error(f"❌ Session '{session_id}' not found.")
+
+        del self.available_sessions[session_id]
+
+        session_file = Path(self.sessions_dir) / f"{session_id}.json"
+        if session_file.exists():
+            session_file.unlink()
+
+        if session_id == current_session_id:
+            remaining = list(self.available_sessions.keys())
+            new_session = remaining[0] if remaining else None
+            return HookResult.refresh_sessions(
+                f"✅ Session '{session_id}' deleted. Current session was deleted.",
+                new_session_id=new_session
+            )
+
+        return HookResult.ok(f"✅ Session '{session_id}' deleted.")
+
+    async def hook_rename_session(self, *args, **kwargs) -> HookResult:
+        """Rename a session."""
+        runtime = kwargs.get("runtime")
+        current_session_id = runtime.session_id if runtime else None
+
+        if len(args) < 2:
+            return HookResult.error("Usage: /rename <old_name> <new_name>")
+
+        old_name, new_name = args[0], args[1]
+
+        if old_name not in self.available_sessions:
+            return HookResult.error(f"❌ Session '{old_name}' not found.")
+
+        if new_name in self.available_sessions:
+            return HookResult.error(f"❌ Session '{new_name}' already exists.")
+
+        rt = self.available_sessions[old_name]
+        rt.session_id = new_name
+
+        del self.available_sessions[old_name]
+        self.available_sessions[new_name] = rt
+
+        old_file = Path(self.sessions_dir) / f"{old_name}.json"
+        if old_file.exists():
+            old_file.unlink()
+        self._save_runtime(rt)
+
+        if old_name == current_session_id:
+            return HookResult.switch_session(
+                f"✅ Session renamed: {old_name} -> {new_name}",
+                new_name
+            )
+
+        return HookResult.ok(f"✅ Session renamed: {old_name} -> {new_name}")
+
+    async def hook_clear_session(self, *args, **kwargs) -> HookResult:
+        """Clear current session history."""
+        runtime = kwargs.get("runtime")
+        if not runtime:
+            return HookResult.error("❌ No active session.")
+
+        runtime.conversation_history.clear()
+        return HookResult.ok("✅ Session history cleared.")
+
+    async def hook_compress_session(self, *args, **kwargs) -> HookResult:
+        """Compress current session context."""
+        runtime = kwargs.get("runtime")
+        if not runtime:
+            return HookResult.error("❌ No active session.")
+
+        if self.agent and self.agent.context_manager:
+            result = await self.agent.context_manager.compress_context(runtime)
+            return HookResult.ok(f"✅ {result}")
+        return HookResult.error("❌ Context manager not available.")
+
+    async def hook_save_session(self, *args, **kwargs) -> HookResult:
+        """Save current session to disk."""
+        runtime = kwargs.get("runtime")
+        if not runtime:
+            return HookResult.error("❌ No active session.")
+
+        try:
+            file_path = runtime.save_to_file(self.sessions_dir)
+            return HookResult.ok(f"✅ Session saved to: {file_path}")
+        except Exception as e:
+            return HookResult.error(f"❌ Failed to save session: {e}")
+
+    async def hook_show_history(self, *args, **kwargs) -> HookResult:
+        """Show current session history."""
+        runtime = kwargs.get("runtime")
+        if not runtime:
+            return HookResult.error("❌ No active session.")
+
+        if not runtime.conversation_history:
+            return HookResult.ok("📭 No messages in history.")
+
+        lines = [f"📜 Session History ({len(runtime.conversation_history)} messages):"]
+        for idx, msg in enumerate(runtime.conversation_history, 1):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if len(content) > 100:
+                content = content[:100] + "..."
+            lines.append(f"  {idx}. [{role}] {content}")
+
+        return HookResult.ok("\n".join(lines))
+
+    async def hook_list_tools(self, *args, **kwargs) -> HookResult:
+        """List enabled tools for the current runtime."""
+        runtime = kwargs.get("runtime")
+        if not runtime:
+            return HookResult.error("❌ No active session.")
+
+        if not self.agent or not self.agent.tool_manager:
+            return HookResult.error("❌ Tool manager not available.")
+
+        enabled_tools = runtime.enabled_tools
+
+        if not enabled_tools:
+            tools = self.agent.tool_manager.get_all_tools()
+            lines = [f"🔧 All Available Tools ({len(tools)}) - none specifically enabled:"]
+            for tool in tools:
+                name = tool.get("function", {}).get("name", "unknown")
+                desc = tool.get("function", {}).get("description", "No description")
+                lines.append(f"  • {name}: {desc}")
+            return HookResult.ok("\n".join(lines))
+
+        lines = [f"🔧 Enabled Tools ({len(enabled_tools)}) for session '{runtime.session_id}':"]
+        for tool_name in enabled_tools:
+            tool = self.agent.tool_manager.get_tool(tool_name)
+            if tool:
+                desc = tool.description if hasattr(tool, 'description') else "No description"
+                lines.append(f"  ✅ {tool_name}: {desc}")
             else:
-                # Load from file to get count
-                try:
-                    session_file = self.sessions_dir / f"{session_id}.json"
-                    if session_file.exists():
-                        with open(session_file, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                            runtime_data = data.get("runtime", {})
-                            msg_count = len(runtime_data.get("conversation_history", []))
-                    else:
-                        msg_count = 0
-                except:
-                    msg_count = 0
+                lines.append(f"  ⚠️  {tool_name}: Tool not found")
 
-            lines.append(f"| {name} | {msg_count} | {created} | {last_active} |")
+        return HookResult.ok("\n".join(lines))
 
-        lines.append("")
-        lines.append("*Current session")
+    async def hook_help(self, *args, **kwargs) -> HookResult:
+        """Show help information."""
+        help_text = """
+🤖 Available Commands:
 
-        return "\n".join(lines)
+Session Management:
+  /new [name]        - Create a new session
+  /switch <name>     - Switch to another session
+  /list              - List all sessions
+  /delete <name>     - Delete a session
+  /rename <old> <new> - Rename a session
 
-    def hook_delete_session(
-        self, *args, hook_context: Optional[Dict[str, Any]] = None
-    ) -> str:
+Session Operations:
+  /clear             - Clear current session history
+  /compress          - Compress conversation context
+  /save              - Save session to disk
+  /history           - Show session history
+
+Tools & Info:
+  /tools             - List available tools
+  /help              - Show this help message
+
+Other:
+  exit, quit         - Exit the shell
         """
-        Delete a session.
-        Usage: /delete <name_or_id>
+        return HookResult.ok(help_text)
+
+
+class ChannelAdapter:
+    """
+    Adapter to connect any Channel with the InteractionManager.
+    Provides a unified interface for channel-to-manager communication.
+    """
+
+    def __init__(self, manager: InteractionManager):
+        self.manager = manager
+
+    async def handle_message(self, text: str, session_id: str) -> HandleResult:
         """
-        if not args:
-            return "Usage: /delete <session_name_or_id>"
-
-        target = args[0]
-        session_id = self._resolve_session_name(target)
-
-        if not session_id:
-            return f"Session '{target}' not found."
-
-        if session_id == self.current_session_id:
-            return "Cannot delete the current active session. Switch to another session first."
-
-        # Delete session file
-        try:
-            session_file = self.sessions_dir / f"{session_id}.json"
-            if session_file.exists():
-                session_file.unlink()
-        except Exception as e:
-            return f"Error deleting session file: {e}"
-
-        # Remove from metadata
-        metadata = self.session_metadata.pop(session_id, {})
-        name = metadata.get("name", session_id)
-
-        return f"Deleted session: {name}"
-
-    def hook_rename_session(
-        self, *args, hook_context: Optional[Dict[str, Any]] = None
-    ) -> str:
+        Handle incoming message from any channel.
+        This is the unified entry point for all channels.
         """
-        Rename the current session.
-        Usage: /rename <new_name>
-        """
-        if not args:
-            return "Usage: /rename <new_name>"
-
-        if not self.current_session_id:
-            return "No active session to rename."
-
-        new_name = args[0]
-        
-        # Check for conflicts
-        resolved_name = self._resolve_duplicate_name(new_name)
-        if resolved_name != new_name:
-            return f"Name '{new_name}' already exists. Use '{resolved_name}' instead or choose a different name."
-
-        # Update metadata
-        if self.current_session_id in self.session_metadata:
-            self.session_metadata[self.current_session_id]["name"] = new_name
-            self._save_session(self.current_session_id)
-            return f"Renamed session to: {new_name}"
-
-        return "Failed to rename session."
+        return await self.manager.handle_request(text, session_id)

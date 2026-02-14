@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Awaitable, Optional, Dict
+from typing import Any, Callable, Awaitable, Optional, Dict, Union
 
 
 class BaseChannel(ABC):
@@ -8,12 +8,12 @@ class BaseChannel(ABC):
     """
 
     def __init__(self):
-        self.message_handler: Optional[Callable[[str, str], Awaitable[str]]] = None
+        self.message_handler: Optional[Callable[[str, str], Awaitable[Any]]] = None
 
-    def set_message_handler(self, handler: Callable[[str, str], Awaitable[str]]):
+    def set_message_handler(self, handler: Callable[[str, str], Awaitable[Any]]):
         """
         Set the handler that will process incoming messages.
-        The handler should accept (text, session_id) and return a response string.
+        The handler should accept (text, session_id) and return a response.
         """
         self.message_handler = handler
 

@@ -1,154 +1,258 @@
 """
 Agent module for kagent - core conversation loop.
-
-This module provides the AgentLoop class which manages the conversation flow
-between user and LLM, handling tool calls and responses.
 """
 
-from typing import Dict, Any, Optional, Callable, List
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List, Union
 
 from kagent.core.tool import ToolManager
-from kagent.core.context import AgentRuntime, ContextManager, Context
-from kagent.core.skill import SkillManager, Skill
-from kagent.core.config import load_config
+from kagent.core.context import AgentRuntime, ContextManager
+from kagent.core.skill import SkillLibrary, Skill
 from kagent.llm.client import LLMClient
 
 
-class AgentLoop:
+@dataclass
+class AgentConfig:
     """
-    Agent Loop with tool support.
+    Configuration for an Agent.
+    
+    For tools and skills:
+    - "all" or ["all"]: Enable all available tools/skills
+    - "none" or []: Disable all tools/skills
+    - ["tool1", "tool2"]: Enable specific tools/skills
+    """
+    type: str = "main"
+    name: str = ""
+    tools: Union[str, List[str]] = field(default_factory=list)
+    skills: Union[str, List[str]] = field(default_factory=list)
+    description: str = ""
+    prompt: str = ""
 
-    This class manages the conversation with LLM and coordinates tool execution
-    through the ToolManager. It delegates LLM calls to LLMClient and context
-    management to Context.
-    """
+    def _normalize_tools_skills(self, value: Union[str, List[str]]) -> List[str]:
+        """Normalize tools/skills value to a list."""
+        if isinstance(value, str):
+            value = value.lower().strip()
+            print(f"Normalizing value: {value}")
+            if value == "all":
+                return ["all"]
+            elif value == "none" or value == "":
+                return []
+            else:
+                # Comma-separated list
+                return [t.strip() for t in value.split(",") if t.strip()]
+        elif isinstance(value, list):
+            if len(value) == 1 and isinstance(value[0], str):
+                first = value[0].lower().strip()
+                if first == "all":
+                    return ["all"]
+                elif first == "none":
+                    return []
+            return [t.strip() for t in value if t and isinstance(t, str) and t.strip()]
+        return []
+
+    def get_tools_list(self) -> List[str]:
+        """Get normalized tools list."""
+        return self._normalize_tools_skills(self.tools)
+
+    def get_skills_list(self) -> List[str]:
+        """Get normalized skills list."""
+        return self._normalize_tools_skills(self.skills)
+
+    def is_all_tools(self) -> bool:
+        """Check if all tools are enabled."""
+        tools = self.get_tools_list()
+        return len(tools) == 1 and tools[0] == "all"
+
+    def is_no_tools(self) -> bool:
+        """Check if no tools are enabled."""
+        return len(self.get_tools_list()) == 0
+
+    def is_all_skills(self) -> bool:
+        """Check if all skills are enabled."""
+        skills = self.get_skills_list()
+        return len(skills) == 1 and skills[0] == "all"
+
+    def is_no_skills(self) -> bool:
+        """Check if no skills are enabled."""
+        return len(self.get_skills_list()) == 0
+
+    @classmethod
+    def from_markdown(cls, content: str) -> "AgentConfig":
+        """Parse Markdown file content and return config instance."""
+        lines = content.splitlines()
+        metadata = {}
+        body_lines = []
+        in_metadata = False
+        for line in lines:
+            if line.startswith("---"):
+                in_metadata = not in_metadata
+                continue
+            if in_metadata:
+                if ":" in line:
+                    key, val = line.split(":", 1)
+                    metadata[key.strip()] = val.strip()
+            else:
+                body_lines.append(line)
+        
+        # Parse tools - can be "all", "none", or comma-separated list
+        tools_raw = metadata.get("tools", "").lower().strip()
+        if tools_raw == "all":
+            tools = "all"
+        elif tools_raw == "none" or tools_raw == "":
+            tools = []
+        else:
+            tools = [t.strip() for t in tools_raw.split(",") if t.strip()]
+        
+        # Parse skills - can be "all", "none", or comma-separated list
+        skills_raw = metadata.get("skills", "").lower().strip()
+        if skills_raw == "all":
+            skills = "all"
+        elif skills_raw == "none" or skills_raw == "":
+            skills = []
+        else:
+            skills = [s.strip() for s in skills_raw.split(",") if s.strip()]
+        
+        return cls(
+            type=metadata.get("type", "main"),
+            name=metadata.get("name", ""),
+            description=metadata.get("description", ""),
+            tools=tools,
+            skills=skills,
+            prompt="\n".join(body_lines).strip(),
+        )
+
+
+class Agent:
+    """Agent - User-facing interface for conversation."""
 
     def __init__(
         self,
+        agent_config: AgentConfig,
         llm_client: LLMClient,
+        context_manager: ContextManager,
         tool_manager: ToolManager,
-        context: Optional[ContextManager] = None,
-        skill_manager: Optional[SkillManager] = None,
-        max_iterations: int = 100,
+        skill_library: SkillLibrary,
     ):
-        """
-        Initialize AgentLoop.
-
-        Args:
-            llm_client: LLM client for API calls
-            tool_manager: ToolManager instance for tool execution
-            context: Optional Context instance (creates default if not provided)
-            skill_manager: Optional SkillManager for loading skills
-            max_iterations: Maximum tool call iterations per user message
-        """
+        self.config = agent_config
+        self.max_iterations = 100
         self.llm_client = llm_client
+        self.context_manager = context_manager
         self.tool_manager = tool_manager
-        self.max_iterations = max_iterations
-        self.skill_manager = skill_manager
+        self.skill_library = skill_library
+
+    def _get_tool_definitions(self, tool_names: List[str]) -> List[Dict]:
+        """
+        Return OpenAI format tool definitions for enabled tools.
         
-        # Initialize context
-        if context:
-            self.context = context
-        else:
-            # Create default runtime and context
-            config = load_config()
-            runtime = AgentRuntime(
-                max_tokens=config.max_tokens,
-                ratio_of_compress=config.ratio_of_compress,
-                keep_last_n_messages=config.keep_last_n_messages,
-                work_dir=config.work_dir,
-            )
-            self.context = ContextManager(
-                runtime=runtime,
-                model=llm_client.model,
-                llm_client=llm_client,
-                skill_manager=self.skill_manager,
-            )
-            print(f"[ContextManager] System prompt loaded ({len(runtime.system_prompt)} chars):")
-            print("-" * 40)
-            print(runtime.system_prompt[:500] + "..." if len(runtime.system_prompt) > 500 else runtime.system_prompt)
-            print("-" * 40)
-    async def chat(
-        self, 
-        user_input: str,
-        on_tool_call: Optional[Callable[[str, Dict[str, Any], Any], None]] = None
-    ) -> str:
-        """
-        Process a single chat message with tool support.
-
         Args:
-            user_input: User's message
-            on_tool_call: Optional callback for tool execution display
-
+            tool_names: List of tool names, or ["all"] for all tools, or [] for no tools
+        
         Returns:
-            Assistant's response string
+            List of tool definitions in OpenAI format
         """
-        self.context.add_message("user", user_input)
+        # Handle "all" - return all available tools
+        if len(tool_names) == 1 and tool_names[0] == "all":
+            return self.tool_manager.get_all_tools()
+        
+        # Handle empty list - no tools
+        if not tool_names:
+            return []
+        
+        # Handle specific tool list
+        tools = []
+        for name in tool_names:
+            if self.tool_manager.has_tool(name):
+                tool = self.tool_manager.get_tool(name)
+                if tool:
+                    tools.append(tool.to_openai_format())
+        return tools
 
-        iteration = 0
-        while iteration < self.max_iterations:
-            iteration += 1
+    def _get_skills(self, skill_names: List[str]) -> List[Skill]:
+        """
+        Return list of enabled skills.
+        
+        Args:
+            skill_names: List of skill names, or ["all"] for all skills, or [] for no skills
+        
+        Returns:
+            List of Skill objects
+        """
+        # Handle "all" - return all available skills
+        if len(skill_names) == 1 and skill_names[0] == "all":
+            print(f"Enabling all skills: {self.skill_library.get_all_skills()}")
+            return self.skill_library.get_all_skills()
+        
+        # Handle empty list - no skills
+        if not skill_names:
+            return []
+        
+        # Handle specific skill list
+        skills = []
+        for name in skill_names:
+            if self.skill_library.has_skill(name):
+                skill = self.skill_library.get_skill(name)
+                if skill:
+                    skills.append(skill)
+        return skills
 
-            # Get messages for API call
-            messages = self.context.get_messages()
+    def _build_skills_prompt(self, skills: List[Skill]) -> str:
+        """Build skills section for system prompt."""
+        if not skills:
+            return ""
+        sections = []
+        for skill in skills:
+            sections.append(f"<skill name=\"{skill.name}\">\n{skill.content}\n</skill>")
+        return "\n\n".join(sections)
 
-            # Get available tools
-            tools = self.tool_manager.get_openai_tools() if self.tool_manager else None
+    def _build_system_prompt(self) -> str:
+        """Build system prompt with skills."""
+        skills = self._get_skills(self.config.get_skills_list())
+        skills_prompt = self._build_skills_prompt(skills)
+        if skills_prompt:
+            return f"{self.config.prompt}\n\n{skills_prompt}"
+        return self.config.prompt
 
-            # Call LLM
+    def new_session(self, session_id: str) -> AgentRuntime:
+        """Create new agent runtime session."""
+        system_prompt = self._build_system_prompt()
+        runtime = AgentRuntime(
+            session_id=session_id,
+            system_prompt=system_prompt,
+            enabled_tools=self.config.get_tools_list(),
+            enabled_skills=self.config.get_skills_list(),
+        )
+        # Add system message directly without async processing
+        runtime.conversation_history.append({
+            "role": "system",
+            "content": system_prompt,
+        })
+        return runtime
+
+    async def chat(self, runtime: AgentRuntime, user_input: str) -> str:
+        """Process user input and return assistant response."""
+        await self.context_manager.process_a_message(runtime, "user", user_input)
+        tools = self._get_tool_definitions(runtime.enabled_tools)
+
+        assistant_reply = ""
+        for _ in range(self.max_iterations):
+            messages = runtime.conversation_history
             response = await self.llm_client.complete(messages, tools=tools)
 
-            if not response or not response.content and not response.tool_calls:
-                error_msg = "Error: Failed to get response from LLM"
-                self.context.add_message("assistant", error_msg)
-                return error_msg
+            if not response.tool_calls:
+                assistant_reply = response.content
+                break
 
-            # Check if there are tool calls
-            if response.tool_calls:
-                # Prepare tool calls data for storage
-                tool_calls_data = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments,
-                        },
-                    }
-                    for tc in response.tool_calls
-                ]
-
-                # Add assistant message with tool calls to history
-                self.context.add_message(
-                    "assistant",
-                    response.content or "",
-                    tool_calls=tool_calls_data,
+            tool_results = await self.tool_manager.execute_tool_calls(response.tool_calls)
+            for tr in tool_results:
+                await self.context_manager.process_a_message(
+                    runtime,
+                    role="tool",
+                    content=tr["content"],
+                    tool_call_id=tr["tool_call_id"],
+                    name=tr["name"],
                 )
+        else:
+            assistant_reply = "Too many tool calls, please try again later."
 
-                # Execute tools with callback for display
-                tool_results = await self.tool_manager.execute_tool_calls(
-                    response.tool_calls,
-                    on_tool_executed=on_tool_call
-                )
-
-                # Add tool results to conversation
-                for tool_result in tool_results:
-                    self.context.add_message(
-                        tool_result["role"],
-                        tool_result["content"],
-                        tool_call_id=tool_result.get("tool_call_id"),
-                        name=tool_result.get("name"),
-                    )
-
-                # Continue loop to let LLM process tool results
-                continue
-            else:
-                # No tool calls, we have a final response
-                response_content = response.content or "No response generated"
-                self.context.add_message("assistant", response_content)
-                return response_content
-
-        # Max iterations reached
-        max_iter_msg = "Error: Maximum tool iteration limit reached"
-        self.context.add_message("assistant", max_iter_msg)
-        return max_iter_msg
+        await self.context_manager.process_a_message(runtime, "assistant", assistant_reply)
+        return assistant_reply

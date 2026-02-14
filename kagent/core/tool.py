@@ -1,92 +1,17 @@
 """
 Tool system for kagent with decorator-based registration.
-
-Usage:
-    from kagent.core.tool import tool, ToolManager
-
-    @tool(description="Optional custom description")
-    async def my_tool(param: str, optional: int = 0) -> str:
-        '''Tool description here'''
-        return f"Result: {param}"
 """
 
 import json
-import os
-import sys
 import asyncio
 import inspect
 import traceback
 import importlib
 import pkgutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Dict, Any, List, Callable, Awaitable, Optional, Union, TypeVar
-
-
-class MCPToolAdapter:
-    """
-    Adapter to bridge MCP (Model Context Protocol) tools into the kagent tool system.
-    """
-
-    def __init__(self, mcp_url: str):
-        self.mcp_url = mcp_url
-        self.tools_cache = {}
-
-    async def get_mcp_tools(self) -> List["Tool"]:
-        """Fetch tools from MCP server and wrap them as kagent Tools."""
-        try:
-            from fastmcp import Client
-        except ImportError:
-            print("Warning: fastmcp not installed. MCP tools will not be available.")
-            return []
-
-        try:
-            async with Client(self.mcp_url) as client:
-                mcp_tools = await client.list_tools()
-                kagent_tools = []
-                for tool in mcp_tools:
-                    # Create a handler that calls the MCP tool
-                    # We need to capture the current tool name in the closure
-                    handler = self._make_handler(tool.name)
-
-                    kagent_tool = Tool(
-                        name=tool.name,
-                        description=tool.description or "",
-                        parameters=tool.inputSchema or {"type": "object", "properties": {}},
-                        handler=handler,
-                    )
-                    kagent_tools.append(kagent_tool)
-                    self.tools_cache[tool.name] = tool
-
-                return kagent_tools
-        except Exception as e:
-            print(f"Error fetching MCP tools from {self.mcp_url}: {e}")
-            return []
-
-    def _make_handler(self, tool_name: str):
-        """Helper to create a handler closure for an MCP tool."""
-
-        async def handler(**arguments):
-            return await self.call_mcp_tool(tool_name, arguments)
-
-        return handler
-
-    async def call_mcp_tool(self, tool_name: str, arguments: dict):
-        """Call an MCP tool and return the result."""
-        from fastmcp import Client
-
-        try:
-            async with Client(self.mcp_url) as client:
-                result = await client.call_tool(tool_name, arguments)
-                # Handle different result formats from fastmcp
-                if hasattr(result, "data"):
-                    return result.data
-                if hasattr(result, "content") and len(result.content) > 0:
-                    return result.content[0].text
-                return str(result)
-        except Exception as e:
-            raise Exception(f"Failed to call MCP tool '{tool_name}': {e}")
+from typing import Dict, Any, List, Callable, Awaitable, Optional, Union
 
 
 @dataclass
@@ -100,7 +25,7 @@ class ToolResult:
     error: Optional[str] = None
 
     def to_display_string(self) -> str:
-        """Format the tool result for display to the user."""
+        """Format the tool result for display."""
         lines = [
             f"[Tool: {self.tool_name}]",
             f"Arguments: {json.dumps(self.arguments, ensure_ascii=False, indent=2)}",
@@ -119,7 +44,7 @@ class Tool:
 
     name: str
     description: str
-    parameters: Dict[str, Any]  # JSON Schema
+    parameters: Dict[str, Any]
     handler: Callable[..., Awaitable[Any]]
 
     def to_openai_format(self) -> Dict[str, Any]:
@@ -134,6 +59,59 @@ class Tool:
         }
 
 
+class MCPToolAdapter:
+    """Adapter to bridge MCP (Model Context Protocol) tools into kagent."""
+
+    def __init__(self, mcp_url: str):
+        self.mcp_url = mcp_url
+
+    async def get_mcp_tools(self) -> List["Tool"]:
+        """Fetch tools from MCP server and wrap them as kagent Tools."""
+        try:
+            from fastmcp import Client
+        except ImportError:
+            print("Warning: fastmcp not installed. MCP tools will not be available.")
+            return []
+
+        try:
+            async with Client(self.mcp_url) as client:
+                mcp_tools = await client.list_tools()
+                kagent_tools = []
+                for tool in mcp_tools:
+                    handler = self._make_handler(tool.name)
+                    kagent_tool = Tool(
+                        name=tool.name,
+                        description=tool.description or "",
+                        parameters=tool.inputSchema or {"type": "object", "properties": {}},
+                        handler=handler,
+                    )
+                    kagent_tools.append(kagent_tool)
+                return kagent_tools
+        except Exception as e:
+            print(f"Error fetching MCP tools from {self.mcp_url}: {e}")
+            return []
+
+    def _make_handler(self, tool_name: str):
+        """Create a handler closure for an MCP tool."""
+        async def handler(**arguments):
+            return await self.call_mcp_tool(tool_name, arguments)
+        return handler
+
+    async def call_mcp_tool(self, tool_name: str, arguments: dict):
+        """Call an MCP tool and return the result."""
+        from fastmcp import Client
+        try:
+            async with Client(self.mcp_url) as client:
+                result = await client.call_tool(tool_name, arguments)
+                if hasattr(result, "data"):
+                    return result.data
+                if hasattr(result, "content") and len(result.content) > 0:
+                    return result.content[0].text
+                return str(result)
+        except Exception as e:
+            raise Exception(f"Failed to call MCP tool '{tool_name}': {e}")
+
+
 def _python_type_to_json_schema(py_type: type) -> Dict[str, Any]:
     """Convert Python type to JSON Schema type."""
     type_map = {
@@ -145,15 +123,12 @@ def _python_type_to_json_schema(py_type: type) -> Dict[str, Any]:
         dict: {"type": "object"},
     }
 
-    # Handle Optional types
     origin = getattr(py_type, "__origin__", None)
     if origin is Union:
         args = getattr(py_type, "__args__", ())
-        # Filter out NoneType
         non_none_types = [arg for arg in args if arg is not type(None)]
         if len(non_none_types) == 1:
             return _python_type_to_json_schema(non_none_types[0])
-        # Multiple types - use anyOf
         return {"anyOf": [_python_type_to_json_schema(t) for t in non_none_types]}
 
     return type_map.get(py_type, {"type": "string"})
@@ -169,30 +144,25 @@ def _build_schema_from_signature(
     param_descriptions = param_descriptions or {}
 
     for name, param in sig.parameters.items():
-        # Skip **kwargs
         if param.kind == inspect.Parameter.VAR_KEYWORD:
             continue
 
-        # Get type annotation
         if param.annotation != inspect.Parameter.empty:
             schema = _python_type_to_json_schema(param.annotation)
         else:
             schema = {"type": "string"}
 
-        # Add description
         if name in param_descriptions:
             schema["description"] = param_descriptions[name]
 
         properties[name] = schema
 
-        # Check if required
         if param.default == inspect.Parameter.empty:
             required.append(name)
 
     return {"type": "object", "properties": properties, "required": required}
 
 
-# Global registry for decorated tools
 _tool_registry: List[Tool] = []
 
 
@@ -201,37 +171,18 @@ def tool(
     description: Optional[str] = None,
     param_descriptions: Optional[Dict[str, str]] = None,
 ):
-    """
-    Decorator to register a function as a tool.
-
-    Args:
-        name: Tool name (defaults to function name)
-        description: Tool description (defaults to function docstring)
-        param_descriptions: Descriptions for parameters {param_name: description}
-
-    Example:
-        @tool(param_descriptions={"path": "File path to read"})
-        async def read_file(path: str, limit: int = 100) -> str:
-            '''Read file contents'''
-            return open(path).read()[:limit]
-    """
+    """Decorator to register a function as a tool."""
 
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__
         tool_desc = description or (func.__doc__ or "").strip()
-
-        # Build schema from signature
         parameters = _build_schema_from_signature(func, param_descriptions)
 
-        # Create tool
         tool_obj = Tool(
             name=tool_name, description=tool_desc, parameters=parameters, handler=func
         )
-
-        # Register globally
         _tool_registry.append(tool_obj)
 
-        # Mark function as a tool
         func._tool = tool_obj
 
         @wraps(func)
@@ -244,60 +195,37 @@ def tool(
     return decorator
 
 
-def clear_tool_registry():
-    """Clear the global tool registry."""
-    global _tool_registry
-    _tool_registry = []
-
-
 def get_registered_tools() -> List[Tool]:
     """Get all tools registered via decorator."""
     return _tool_registry.copy()
 
 
 class ToolManager:
-    """
-    Central manager for all tools.
-
-    Responsibilities:
-    - Manage tool registration and execution
-    - Provide tools in OpenAI function calling format
-    """
+    """Central manager for all tools."""
 
     def __init__(self, load_builtin: bool = True, load_mcp: bool = True):
-        """
-        Initialize ToolManager.
-
-        Args:
-            load_builtin: Whether to automatically load built-in tools from kagent.tools
-            load_mcp: Whether to automatically load MCP tools from .agent/mcp.json
-        """
         self._tools: Dict[str, Tool] = {}
-        self._load_mcp_flag = load_mcp
-        self._mcp_load_task: Optional[asyncio.Task] = None
+        self._load_mcp = load_mcp
+        self._mcp_loaded = False
 
         if load_builtin:
             self.load_builtin_tools()
         if load_mcp:
-            # Try to start loading immediately if loop exists
-            self._check_and_start_mcp_load()
+            self._start_mcp_load()
 
-    def _check_and_start_mcp_load(self) -> None:
-        """Check if an event loop is running and start the MCP loading task."""
-        if not self._load_mcp_flag or self._mcp_load_task:
-            return
-
+    def _start_mcp_load(self) -> None:
+        """Start loading MCP tools if event loop is running."""
         try:
             loop = asyncio.get_running_loop()
-            self._mcp_load_task = loop.create_task(self.load_mcp_tools())
+            loop.create_task(self.load_mcp_tools())
         except RuntimeError:
-            # No running loop yet
             pass
 
     async def load_mcp_tools(self) -> None:
-        """
-        Load MCP tools from .agent/mcp.json.
-        """
+        """Load MCP tools from .agent/mcp.json."""
+        if self._mcp_loaded:
+            return
+
         mcp_config_path = Path(".agent/mcp.json")
         if not mcp_config_path.exists():
             return
@@ -306,10 +234,8 @@ class ToolManager:
             with open(mcp_config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-            # Standard MCP format has "mcpServers" at root
             mcp_servers = config.get("mcpServers", {}) if isinstance(config, dict) else {}
 
-            # Handle list format as fallback
             if not mcp_servers and isinstance(config, list):
                 for entry in config:
                     mcp_servers.update(entry.get("mcpServers", {}))
@@ -317,31 +243,27 @@ class ToolManager:
             for server_name, server_config in mcp_servers.items():
                 url = server_config.get("url")
                 if url:
-                    print(f"🔄 Loading MCP tools from {server_name} ({url})...")
+                    print(f"Loading MCP tools from {server_name} ({url})...")
                     adapter = MCPToolAdapter(url)
                     mcp_tools = await adapter.get_mcp_tools()
                     for t in mcp_tools:
                         self.register(t)
                     if mcp_tools:
-                        print(
-                            f"✅ Loaded {len(mcp_tools)} tools from MCP server: {server_name}"
-                        )
+                        print(f"Loaded {len(mcp_tools)} tools from MCP server: {server_name}")
+
+            self._mcp_loaded = True
         except Exception as e:
             print(f"Error loading MCP config: {e}")
 
     def load_builtin_tools(self) -> None:
-        """
-        Automatically discover and load all tools in the kagent.tools package.
-        """
+        """Automatically discover and load all tools in the kagent.tools package."""
         import kagent.tools as tools_package
 
-        # Discover and import all modules in kagent.tools
         for _, module_name, _ in pkgutil.iter_modules(
             tools_package.__path__, tools_package.__name__ + "."
         ):
             try:
                 module = importlib.import_module(module_name)
-                # After importing (or getting from cache), scan module for tools
                 for attr_name in dir(module):
                     attr = getattr(module, attr_name)
                     tool_obj = getattr(attr, "_tool", None)
@@ -350,56 +272,27 @@ class ToolManager:
             except Exception as e:
                 print(f"Error loading tool module {module_name}: {e}")
 
-        # Also register any tools that might have been registered globally via other means
         for tool_obj in get_registered_tools():
             self.register(tool_obj)
-
-    def add_tools(self, tool_funcs: List[Callable]) -> None:
-        """
-        Add extra tools from a list of decorated functions.
-
-        Args:
-            tool_funcs: List of functions decorated with @tool
-        """
-        for func in tool_funcs:
-            # Check if it's a decorated function (has _tool attribute)
-            tool_obj = getattr(func, "_tool", None)
-            if tool_obj and isinstance(tool_obj, Tool):
-                self.register(tool_obj)
-            else:
-                # If it's not decorated, we could potentially try to decorate it on the fly
-                # but based on requirements, we expect decorated tools.
-                print(f"Warning: Function {func.__name__} is not a decorated tool.")
 
     def register(self, tool: Tool) -> None:
         """Register a tool."""
         self._tools[tool.name.lower()] = tool
 
-    def unregister(self, name: str) -> None:
-        """Unregister a tool by name."""
-        name = name.lower()
-        if name in self._tools:
-            del self._tools[name]
-
     def get_tool(self, name: str) -> Optional[Tool]:
         """Get a tool by name."""
         return self._tools.get(name.lower())
 
-    def list_tools(self) -> List[Tool]:
-        """List all registered tools."""
-        self._check_and_start_mcp_load()
-        return list(self._tools.values())
+    def has_tool(self, name: str) -> bool:
+        """Check if a tool with the given name exists."""
+        return name.lower() in self._tools
 
-    def get_openai_tools(self) -> List[Dict[str, Any]]:
+    def get_all_tools(self) -> List[Dict[str, Any]]:
         """Get all tools in OpenAI function calling format."""
-        self._check_and_start_mcp_load()
         return [tool.to_openai_format() for tool in self._tools.values()]
 
     async def execute(self, tool_name: str, arguments: Dict[str, Any]) -> ToolResult:
         """Execute a tool with given arguments."""
-        # Ensure MCP tools are being loaded if they haven't started yet
-        self._check_and_start_mcp_load()
-
         tool = self.get_tool(tool_name)
         if not tool:
             return ToolResult(
@@ -407,7 +300,7 @@ class ToolManager:
                 tool_name=tool_name,
                 arguments=arguments,
                 result=None,
-                error=f"Tool '{tool_name}' not found. Available: {', '.join(self._tools.keys())}",
+                error=f"Tool '{tool_name}' not found",
             )
 
         try:
@@ -424,23 +317,9 @@ class ToolManager:
                 error=f"{str(e)}\n{traceback.format_exc()}",
             )
 
-    async def execute_multiple(self, calls: List[Dict[str, Any]]) -> List[ToolResult]:
-        """Execute multiple tool calls concurrently."""
-        tasks = [self.execute(call["tool_name"], call["arguments"]) for call in calls]
-        return await asyncio.gather(*tasks)
-
-    async def execute_tool_calls(
-        self, 
-        tool_calls: List[Any],
-        on_tool_executed: Optional[Callable[[str, Dict[str, Any], ToolResult], None]] = None
-    ) -> List[Dict[str, Any]]:
+    async def execute_tool_calls(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
         """
-        Execute tool calls from LLM responses and return formatted messages.
-
-        Args:
-            tool_calls: List of tool call objects (OpenAI or LLMToolCall format)
-            on_tool_executed: Optional callback function(tool_name, arguments, result) 
-                             called after each tool execution for display purposes
+        Execute tool calls from LLM responses.
 
         Returns:
             List of tool result messages ready for conversation history
@@ -448,9 +327,7 @@ class ToolManager:
         tool_messages = []
 
         for tool_call in tool_calls:
-            # Extract tool call info (handles both OpenAI and unified format)
             if hasattr(tool_call, "function"):
-                # OpenAI format
                 tool_name = tool_call.function.name
                 tool_id = tool_call.id
                 try:
@@ -458,7 +335,6 @@ class ToolManager:
                 except json.JSONDecodeError:
                     arguments = {}
             else:
-                # Unified format (from LLMToolCall)
                 tool_name = tool_call.name
                 tool_id = tool_call.id
                 try:
@@ -466,14 +342,8 @@ class ToolManager:
                 except json.JSONDecodeError:
                     arguments = {}
 
-            # Execute the tool
             result: ToolResult = await self.execute(tool_name, arguments)
 
-            # Call callback if provided (for channel-specific display)
-            if on_tool_executed:
-                on_tool_executed(tool_name, arguments, result)
-
-            # Create tool result message
             tool_messages.append(
                 {
                     "role": "tool",

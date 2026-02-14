@@ -1,107 +1,147 @@
+"""
+Shell App - Interactive shell channel with full InteractionManager integration.
+
+This is the main entry point for running KAgent in interactive shell mode.
+It demonstrates the complete integration between:
+- ShellChannel: Handles user input/output via terminal
+- InteractionManager: Manages multiple sessions and hook commands
+- Agent: Processes conversations and tool calls
+
+Usage:
+    python test/shell_app.py
+
+Commands:
+    /help          - Show available commands
+    /new [name]    - Create a new session
+    /switch <name> - Switch to another session
+    /list          - List all sessions
+    /delete <name> - Delete a session
+    /rename <o> <n> - Rename a session
+    /clear         - Clear current session history
+    /compress      - Compress conversation context
+    /save          - Save session to disk
+    /history       - Show session history
+    /tools         - List available tools
+    exit, quit     - Exit the shell
+"""
+
+import asyncio
 import os
 import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from dotenv import load_dotenv
 
-# Add project root to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from kagent.core.agent import AgentLoop
-from kagent.core.context import AgentRuntime, Context
-from kagent.core.skill import SkillManager
-from kagent.interaction.manager import InteractionManager
-from kagent.channel.shell import ShellChannel
-from kagent.app.main_app import AgentApp
-
+# Load environment variables
 load_dotenv()
 
+from kagent.core import Agent, AgentRuntime, ContextManager, ToolManager, SkillLibrary
+from kagent.core.agent import AgentConfig
+from kagent.llm.client import LLMClient
+from kagent.interaction.manager import InteractionManager
+from kagent.channel.shell import ShellChannel
 
-def test_shell_integration():
+
+def create_agent() -> Agent:
     """
-    Test the multi-layer architecture using the ShellChannel with tools and skills.
-    Structure: AgentLoop (with ToolManager + SkillManager) -> InteractionManager -> ShellChannel -> AgentApp
+    Create and configure the Agent with all necessary components.
+    
+    Returns:
+        Configured Agent instance ready for use
     """
-    print("🛠️  Setting up Shell Test Environment with Tools & Skills...")
-
-    # 1. Create Tool Manager with built-in tools (loaded via @tool decorators)
-    from kagent.core.tool import ToolManager
-    from kagent.llm.client import LLMClient
-
-    tool_manager = ToolManager()
-    print(
-        f"✅ Loaded {len(tool_manager.list_tools())} built-in tools via @tool decorator"
-    )
-
-    # 2. Core Layer (Agent)
-    # Agent receives the tool_manager for executing tools
+    # Initialize LLM client from environment
+    # Supports: openai, claude, etc.
     llm_client = LLMClient.from_env("openai", model="longcat-flash-lite")
     
-    # Create SkillManager to load all skills
-    skill_manager = SkillManager()
-    print(f"✅ Loaded {len(skill_manager.list_skills())} skills from .agent/skills/")
+    # Initialize tool manager with built-in tools
+    # Set load_mcp=True if you want to load MCP tools from .agent/mcp.json
+    tool_manager = ToolManager(load_builtin=True, load_mcp=False)
     
-    # Create runtime and context for the agent
-    runtime = AgentRuntime()
-    context = Context(
-        runtime=runtime,
-        model=llm_client.model,
-        llm_client=llm_client,
-        skill_manager=skill_manager,
-    )
-
+    # Initialize skill library
+    skill_library = SkillLibrary(auto_load=True)
     
-    agent = AgentLoop(
+    # Initialize context manager for conversation handling
+    context_manager = ContextManager(llm_client=llm_client)
+    prompt_path = Path("/Volumes/sn580/projects/myagent/workspace/KAGENT.md")
+    content = prompt_path.read_text()
+    # Configure the agent
+    agent_config = AgentConfig().from_markdown(content)
+    print(agent_config)
+    # Create the agent
+    agent = Agent(
+        agent_config=agent_config,
         llm_client=llm_client,
+        context_manager=context_manager,
         tool_manager=tool_manager,
-        context=context,
-        skill_manager=skill_manager,
+        skill_library=skill_library,
     )
-
-    # 4. Interaction Layer (Manager)
-    # Manages session storage and hooks, delegates tool execution to Agent
-    manager = InteractionManager(agent=agent, model=llm_client.model)
-
-    # 5. Channel Layer (Shell)
-    shell_channel = ShellChannel(session_id="test-session")
-
-    # 6. App Layer (Orchestrator)
-    app = AgentApp(manager=manager, channel=shell_channel)
-
-    print("\n" + "=" * 60)
-    print("✅ System ready! You can now chat with the agent.")
-    print("=" * 60)
     
-    print("\n📋 Session Management:")
-    print("   /new [name]       - Create new session")
-    print("   /switch <name>    - Switch to session")
-    print("   /list             - List all sessions")
-    print("   /delete <name>    - Delete session")
-    print("   /rename <new>     - Rename current session")
+    return agent
+
+
+async def main():
+    """
+    Main entry point for the shell application.
     
-    print("\n📋 Other hooks:")
-    print("   /history - Show conversation history")
-    print("   /clear   - Clear session history")
-    print("   /compress - Compress conversation history")
-    print("   /save [filename] - Save history to file")
-    print("   /tools   - List available tools")
-    
-    print("\n🎯 Skill Management (via tools):")
-    print("   Try asking about PowerPoint, Git, or code review!")
-    print("   Or use: list_skills(), view_skill(name), activate_skill(name)")
-    
-    print("\n🔧 Available tools:")
-    for tool in tool_manager.list_tools():
-        print(f"   • {tool.name}")
+    Sets up the InteractionManager, creates the ShellChannel,
+    and starts the interactive loop.
+    """
+    print("🚀 Starting KAgent Shell...")
     print()
-
-    # Start the app (this will enter an interactive loop)
+        
+    # Create the agent
     try:
-        app.run()
+        agent = create_agent()
+        print(f"✅ Agent initialized: {agent.config.name}")
     except Exception as e:
-        print(f"❌ Test failed: {e}")
+        print(f"❌ Failed to initialize agent: {e}")
+        sys.exit(1)
+    
+    # Create the interaction manager
+    # Sessions will be saved to .agent/sessions/
+    interaction_manager = InteractionManager(sessions_dir=".agent/sessions")
+    interaction_manager.set_agent(agent)
+    print(f"✅ InteractionManager initialized")
+    print(f"   Sessions directory: {interaction_manager.sessions_dir}")
+    
+    # Load existing sessions
+    if interaction_manager.available_sessions:
+        print(f"✅ Loaded {len(interaction_manager.available_sessions)} existing session(s)")
+        for sid in interaction_manager.available_sessions.keys():
+            print(f"   - {sid}")
+    else:
+        print("📭 No existing sessions found")
+    
+    print()
+    
+    # Create and start the shell channel
+    shell_channel = ShellChannel(session_id="default")
+    
+    try:
+        # Run the shell with the interaction manager
+        await shell_channel.run_with_manager(interaction_manager)
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
         import traceback
-
         traceback.print_exc()
+    finally:
+        # Save all sessions on exit
+        print("\n💾 Saving sessions...")
+        for session_id, runtime in interaction_manager.available_sessions.items():
+            try:
+                runtime.save_to_file(interaction_manager.sessions_dir)
+                print(f"   Saved: {session_id}")
+            except Exception as e:
+                print(f"   Failed to save {session_id}: {e}")
+        print("👋 Goodbye!")
 
 
 if __name__ == "__main__":
-    test_shell_integration()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\n👋 Interrupted by user. Goodbye!")
+        sys.exit(0)
