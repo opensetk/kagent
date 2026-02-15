@@ -48,18 +48,23 @@
 │                     │               │                     │
 │  - LarkChannel      │               │  - Session 管理     │
 │  - ShellChannel     │               │  - Hook 命令拦截    │
-│  - TUIChannel       │               │  - 委托给 AgentLoop │
+│  - TUIChannel       │               │  - 消息事件分发     │
 │  - AudioChannel     │               │                     │
 └─────────────────────┘               └──────────┬──────────┘
-                                                 │
-                                                 ▼
-                                      ┌─────────────────────┐
-                                      │     AgentLoop       │
-                                      │    (对话循环核心)    │
-                                      │                     │
-                                      │  - 工具调用编排     │
-                                      │  - 多轮对话管理     │
-                                      └──────────┬──────────┘
+          │                                      │
+          │ on_message(event)                    │
+          │ ◄────────────────────────────────────┘
+          ▼
+┌─────────────────────┐               ┌─────────────────────┐
+│   MessageEvent      │               │       Agent         │
+│   (消息事件系统)     │               │    (对话循环核心)    │
+│                     │               │                     │
+│  - USER_INPUT       │               │  - 工具调用编排     │
+│  - ASSISTANT_THINKING│              │  - 多轮对话管理     │
+│  - TOOL_CALL        │               │  - 事件发送         │
+│  - TOOL_RESULT      │               │                     │
+│  - ASSISTANT_RESPONSE│              │                     │
+└─────────────────────┘               └──────────┬──────────┘
                                                  │
           ┌─────────────────────────────────────┼─────────────────────┐
           ▼                                     ▼                     ▼
@@ -84,6 +89,51 @@
                                    └──────────────────┘
 ```
 
+### 消息事件系统
+
+消息事件系统提供统一的消息回调机制，支持多种消息类型的处理：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Agent.chat()                              │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  emit(MessageEvent.user_input(...))                     │    │
+│  │  emit(MessageEvent.assistant_thinking(...))             │    │
+│  │  emit(MessageEvent.tool_call(...))                      │    │
+│  │  emit(MessageEvent.tool_result(...))                    │    │
+│  │  emit(MessageEvent.assistant_response(...))             │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                              │                                   │
+│                              ▼                                   │
+│                    on_message(event)                             │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      BaseChannel                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  on_message(event):                                      │    │
+│  │    if USER_INPUT:      _display_user_input()            │    │
+│  │    if THINKING:        _display_thinking()              │    │
+│  │    if TOOL_CALL:       _display_tool_call() ← show控制  │    │
+│  │    if TOOL_RESULT:     _display_tool_result() ← show控制│    │
+│  │    if RESPONSE:        _display_response()              │    │
+│  │    if ERROR:           _display_error()                 │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**事件类型**:
+
+| 事件类型 | 说明 | 显示控制 |
+|---------|------|---------|
+| `USER_INPUT` | 用户输入 | 始终显示 |
+| `ASSISTANT_THINKING` | 助手思考内容 | 始终显示 |
+| `TOOL_CALL` | 工具调用 | `show_tool_calls` 控制 |
+| `TOOL_RESULT` | 工具结果 | `show_tool_calls` 控制 |
+| `ASSISTANT_RESPONSE` | 最终回复 | 始终显示 |
+| `ERROR` | 错误信息 | 始终显示 |
+
 ### 数据流
 
 ```mermaid
@@ -91,7 +141,7 @@ sequenceDiagram
     participant User as 用户
     participant Channel as Channel
     participant IM as InteractionManager
-    participant Agent as AgentLoop
+    participant Agent as Agent
     participant TM as ToolManager
     participant CM as ContextManager
     participant LLM as LLMClient
@@ -105,21 +155,22 @@ sequenceDiagram
         IM->>IM: 执行 Hook
         IM-->>Channel: 返回结果
     else 普通消息
-        IM->>Agent: agent.chat(text)
+        IM->>Agent: agent.chat(text, on_message=channel.on_message)
         
+        Agent->>Agent: emit(USER_INPUT)
         Agent->>CM: add_message(user, text)
-        Agent->>CM: get_messages()
-        Agent->>TM: get_openai_tools()
         Agent->>LLM: complete(messages, tools)
         
         alt 有工具调用
-            LLM-->>Agent: tool_calls
+            Agent->>Agent: emit(ASSISTANT_THINKING)
+            Agent->>Agent: emit(TOOL_CALL)
             Agent->>TM: execute_tool_calls()
             TM-->>Agent: tool_results
+            Agent->>Agent: emit(TOOL_RESULT)
             Agent->>CM: add_message(tool, results)
             Agent->>LLM: 继续调用
         else 最终回复
-            LLM-->>Agent: content
+            Agent->>Agent: emit(ASSISTANT_RESPONSE)
         end
         
         Agent-->>IM: response
@@ -283,16 +334,49 @@ async def get_weather(city: str) -> str:
 
 ```python
 from kagent.channel.base import BaseChannel
+from kagent.core.events import MessageEvent
 
 class MyChannel(BaseChannel):
+    def __init__(self, show_tool_calls: bool = True):
+        super().__init__(show_tool_calls=show_tool_calls)
+    
+    async def _display_user_input(self, content: str):
+        # 显示用户输入
+        pass
+    
+    async def _display_thinking(self, content: str):
+        # 显示助手思考内容
+        pass
+    
+    async def _display_tool_call(self, tool_name: str, arguments: dict, tool_call_id: str = None):
+        # 显示工具调用 (受 show_tool_calls 控制)
+        pass
+    
+    async def _display_tool_result(self, tool_name: str, result: any, success: bool, error: str = None):
+        # 显示工具结果 (受 show_tool_calls 控制)
+        pass
+    
+    async def _display_response(self, content: str):
+        # 显示最终回复
+        pass
+    
+    async def _display_error(self, message: str, details: str = None):
+        # 显示错误信息
+        pass
+    
     async def send_message(self, target_id: str, content: str, **kwargs):
-        # 实现消息发送逻辑
+        # 发送消息给用户
         pass
     
     def start(self):
         # 启动通道
         pass
 ```
+
+**参数说明**:
+- `show_tool_calls`: 控制是否显示工具调用和结果信息，默认 `True`
+  - Shell/TUI 通道默认开启
+  - 飞书通道默认关闭 (避免消息过多)
 
 ### 自定义 LLM Provider
 
@@ -322,9 +406,10 @@ kagent/
 │   └── audio.py         # 语音交互
 │
 ├── core/                 # 核心层
-│   ├── agent.py         # AgentLoop 对话循环
+│   ├── agent.py         # Agent 对话循环
 │   ├── config.py        # 配置管理
 │   ├── context.py       # ContextManager + AgentRuntime
+│   ├── events.py        # MessageEvent 消息事件系统
 │   ├── skill.py         # Skill 系统
 │   └── tool.py          # ToolManager + @tool 装饰器
 │

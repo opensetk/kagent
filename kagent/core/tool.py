@@ -321,6 +321,9 @@ class ToolManager:
         """
         Execute tool calls from LLM responses.
 
+        Args:
+            tool_calls: List of tool calls from LLM response
+            
         Returns:
             List of tool result messages ready for conversation history
         """

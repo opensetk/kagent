@@ -12,8 +12,13 @@ class ShellChannel(BaseChannel):
     Integrates with InteractionManager for session management.
     """
 
-    def __init__(self, session_id: str = "local-shell", interaction_manager=None):
-        super().__init__()
+    def __init__(
+        self, 
+        session_id: str = "local-shell", 
+        interaction_manager=None,
+        show_tool_calls: bool = True
+    ):
+        super().__init__(show_tool_calls=show_tool_calls)
         self.session_id = session_id
         self.is_running = False
         self.interaction_manager = interaction_manager
@@ -69,7 +74,15 @@ class ShellChannel(BaseChannel):
                     print("\n👋 Goodbye!")
                     break
 
-                if self._message_handler:
+                if self.interaction_manager:
+                    result = await self.interaction_manager.handle_request(
+                        user_input, 
+                        self.session_id,
+                        on_message=self.on_message
+                    )
+                    await self.send_message(self.session_id, str(result))
+                    self._handle_action(result)
+                elif self._message_handler:
                     result = await self._message_handler(user_input, self.session_id)
                     await self.send_message(self.session_id, str(result))
                     self._handle_action(result)
@@ -125,10 +138,13 @@ class ShellChannel(BaseChannel):
             interaction_manager: InteractionManager instance
         """
         self.interaction_manager = interaction_manager
-        self._message_handler = interaction_manager.handle_request
         
         if self.session_id not in interaction_manager.available_sessions:
-            result = await interaction_manager.handle_request(f"/new {self.session_id}", self.session_id)
+            result = await interaction_manager.handle_request(
+                f"/new {self.session_id}", 
+                self.session_id,
+                on_message=self.on_message
+            )
             self._handle_action(result)
         
         self.is_running = True

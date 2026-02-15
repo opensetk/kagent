@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Awaitable, Optional, Dict, Union
+from typing import Any, Callable, Awaitable, Optional, Dict
+from kagent.core.events import MessageEvent, MessageType
 
 
 class BaseChannel(ABC):
@@ -7,8 +8,9 @@ class BaseChannel(ABC):
     Abstract Base Class for all communication channels (Lark, Slack, etc.)
     """
 
-    def __init__(self):
+    def __init__(self, show_tool_calls: bool = True):
         self.message_handler: Optional[Callable[[str, str], Awaitable[Any]]] = None
+        self.show_tool_calls = show_tool_calls
 
     def set_message_handler(self, handler: Callable[[str, str], Awaitable[Any]]):
         """
@@ -17,32 +19,70 @@ class BaseChannel(ABC):
         """
         self.message_handler = handler
 
-    def on_tool_call(self, tool_name: str, arguments: Dict[str, Any], result: Any) -> None:
+    async def on_message(self, event: MessageEvent) -> None:
         """
-        Callback called when a tool is executed.
-        Override this method in subclasses to display tool execution.
-        Base implementation prints to console.
+        Handle message events from the agent.
+        This is the unified callback for all message types.
         
         Args:
-            tool_name: Name of the tool that was executed
-            arguments: Arguments passed to the tool
-            result: ToolResult object containing success status and result/error
+            event: MessageEvent containing type, content, and metadata
         """
+        if event.type == MessageType.USER_INPUT:
+            await self._display_user_input(event.content)
+        elif event.type == MessageType.ASSISTANT_THINKING:
+            await self._display_thinking(event.content)
+        elif event.type == MessageType.TOOL_CALL:
+            if self.show_tool_calls:
+                await self._display_tool_call(
+                    event.content,
+                    event.metadata.get("arguments", {}),
+                    event.metadata.get("tool_call_id")
+                )
+        elif event.type == MessageType.TOOL_RESULT:
+            if self.show_tool_calls:
+                await self._display_tool_result(
+                    event.content,
+                    event.metadata.get("result"),
+                    event.metadata.get("success", True),
+                    event.metadata.get("error")
+                )
+        elif event.type == MessageType.ASSISTANT_RESPONSE:
+            await self._display_response(event.content)
+        elif event.type == MessageType.ERROR:
+            await self._display_error(event.content, event.metadata.get("details"))
+
+    async def _display_user_input(self, content: str) -> None:
+        """Display user input. Override in subclasses for custom formatting."""
+        pass
+
+    async def _display_thinking(self, content: str) -> None:
+        """Display assistant thinking content. Override in subclasses."""
+        pass
+
+    async def _display_tool_call(self, tool_name: str, arguments: Dict[str, Any], tool_call_id: Optional[str] = None) -> None:
+        """Display tool call. Base implementation prints to console."""
         import json
-        from kagent.core.tool import ToolResult
-        
         print(f"\n[Tool: {tool_name}]")
         print(f"Arguments: {json.dumps(arguments, ensure_ascii=False)}")
-        
-        if isinstance(result, ToolResult):
-            if result.success:
-                result_str = str(result.result)
-                display = result_str[:200] + "..." if len(result_str) > 200 else result_str
-                print(f"Result: {display}")
-            else:
-                print(f"Error: {result.error}")
+
+    async def _display_tool_result(self, tool_name: str, result: Any, success: bool, error: Optional[str] = None) -> None:
+        """Display tool result. Base implementation prints to console."""
+        if success:
+            result_str = str(result)
+            display = result_str[:200] + "..." if len(result_str) > 200 else result_str
+            print(f"Result: {display}")
         else:
-            print(f"Result: {result}")
+            print(f"Error: {error}")
+
+    async def _display_response(self, content: str) -> None:
+        """Display final assistant response. Override in subclasses."""
+        pass
+
+    async def _display_error(self, message: str, details: Optional[str] = None) -> None:
+        """Display error message."""
+        print(f"❌ Error: {message}")
+        if details:
+            print(f"Details: {details}")
 
     @abstractmethod
     async def send_message(self, target_id: str, content: str, **kwargs) -> Any:

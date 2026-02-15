@@ -62,7 +62,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2000,
+        max_tokens: int = 8192,
     ) -> LLMResponse:
         """
         Complete a conversation.

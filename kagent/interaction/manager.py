@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Awaitable
 import json
 import os
 from datetime import datetime
@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from kagent.core import Agent, AgentRuntime, ContextManager
+from kagent.core.events import MessageEvent
 from kagent.interaction.hook import HookDispatcher, HookResult, HookAction
 
 
@@ -90,10 +91,16 @@ class InteractionManager:
         self,
         text: str,
         session_id: str,
+        on_message: Optional[Callable[[MessageEvent], Awaitable[None]]] = None,
     ) -> HandleResult:
         """
         The main entry point for any channel.
         Processes the text for a specific session and returns the response.
+        
+        Args:
+            text: User input text
+            session_id: Session identifier
+            on_message: Optional async callback for message events
         """
         if self.agent is None:
             return HandleResult.response("Error: Agent not set. Please call set_agent() first.")
@@ -109,6 +116,7 @@ class InteractionManager:
             response = await self.agent.chat(
                 runtime=runtime,
                 user_input=text,
+                on_message=on_message,
             )
             self._save_runtime(runtime)
             return HandleResult.response(response)
@@ -376,12 +384,17 @@ class ChannelAdapter:
     Provides a unified interface for channel-to-manager communication.
     """
 
-    def __init__(self, manager: InteractionManager):
+    def __init__(self, manager: InteractionManager, channel: Optional["BaseChannel"] = None):
         self.manager = manager
+        self.channel = channel
 
     async def handle_message(self, text: str, session_id: str) -> HandleResult:
         """
         Handle incoming message from any channel.
         This is the unified entry point for all channels.
         """
-        return await self.manager.handle_request(text, session_id)
+        on_message = None
+        if self.channel and hasattr(self.channel, 'on_message'):
+            on_message = self.channel.on_message
+        
+        return await self.manager.handle_request(text, session_id, on_message=on_message)

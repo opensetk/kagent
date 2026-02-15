@@ -3,11 +3,12 @@ Agent module for kagent - core conversation loop.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Callable, Awaitable
 
-from kagent.core.tool import ToolManager
+from kagent.core.tool import ToolManager, ToolResult
 from kagent.core.context import AgentRuntime, ContextManager
 from kagent.core.skill import SkillLibrary, Skill
+from kagent.core.events import MessageEvent
 from kagent.llm.client import LLMClient
 
 
@@ -228,9 +229,33 @@ class Agent:
         })
         return runtime
 
-    async def chat(self, runtime: AgentRuntime, user_input: str) -> str:
-        """Process user input and return assistant response."""
+    async def chat(
+        self, 
+        runtime: AgentRuntime, 
+        user_input: str,
+        on_message: Optional[Callable[[MessageEvent], Awaitable[None]]] = None
+    ) -> str:
+        """
+        Process user input and return assistant response.
+        
+        Args:
+            runtime: Agent runtime containing conversation state
+            user_input: User's input text
+            on_message: Optional async callback for message events
+        """
+        async def emit(event: MessageEvent):
+            if on_message:
+                try:
+                    import asyncio
+                    result = on_message(event)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as e:
+                    print(f"Error in on_message callback: {e}")
+        
         await self.context_manager.process_a_message(runtime, "user", user_input)
+        await emit(MessageEvent.user_input(user_input))
+        
         tools = self._get_tool_definitions(runtime.enabled_tools)
 
         assistant_reply = ""
@@ -239,11 +264,46 @@ class Agent:
             response = await self.llm_client.complete(messages, tools=tools)
 
             if not response.tool_calls:
-                assistant_reply = response.content
+                assistant_reply = response.content or ""
                 break
 
+            if response.content:
+                await emit(MessageEvent.assistant_thinking(response.content))
+
+            assistant_msg = {
+                "role": "assistant",
+                "content": response.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        },
+                    }
+                    for tc in response.tool_calls
+                ],
+            }
+            runtime.conversation_history.append(assistant_msg)
+
+            for tc in response.tool_calls:
+                import json
+                try:
+                    arguments = json.loads(tc.arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+                await emit(MessageEvent.tool_call(tc.name, arguments, tc.id))
+
             tool_results = await self.tool_manager.execute_tool_calls(response.tool_calls)
+            
             for tr in tool_results:
+                await emit(MessageEvent.tool_result(
+                    tool_name=tr["name"],
+                    result=tr["content"],
+                    success=True,
+                    tool_call_id=tr["tool_call_id"]
+                ))
                 await self.context_manager.process_a_message(
                     runtime,
                     role="tool",
@@ -255,4 +315,5 @@ class Agent:
             assistant_reply = "Too many tool calls, please try again later."
 
         await self.context_manager.process_a_message(runtime, "assistant", assistant_reply)
+        await emit(MessageEvent.assistant_response(assistant_reply))
         return assistant_reply

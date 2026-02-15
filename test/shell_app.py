@@ -54,7 +54,7 @@ def create_agent() -> Agent:
     """
     # Initialize LLM client from environment
     # Supports: openai, claude, etc.
-    llm_client = LLMClient.from_env("openai", model="longcat-flash-lite")
+    llm_client = LLMClient.from_env("openai", model="deepseek-chat")
     
     # Initialize tool manager with built-in tools
     # Set load_mcp=True if you want to load MCP tools from .agent/mcp.json
@@ -118,7 +118,7 @@ async def main():
     print()
     
     # Create and start the shell channel
-    shell_channel = ShellChannel(session_id="default")
+    shell_channel = ShellChannel(session_id="default",show_tool_calls=True)
     
     try:
         # Run the shell with the interaction manager
