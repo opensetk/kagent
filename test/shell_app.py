@@ -54,18 +54,18 @@ def create_agent() -> Agent:
     """
     # Initialize LLM client from environment
     # Supports: openai, claude, etc.
-    llm_client = LLMClient.from_env("openai", model="deepseek-chat")
+    llm_client = LLMClient.from_preset("modelscope")
     
     # Initialize tool manager with built-in tools
     # Set load_mcp=True if you want to load MCP tools from .agent/mcp.json
-    tool_manager = ToolManager(load_builtin=True, load_mcp=False)
+    tool_manager = ToolManager(load_builtin=True, load_mcp=True)
     
     # Initialize skill library
     skill_library = SkillLibrary(auto_load=True)
     
     # Initialize context manager for conversation handling
     context_manager = ContextManager(llm_client=llm_client)
-    prompt_path = Path("/Volumes/sn580/projects/myagent/workspace/KAGENT.md")
+    prompt_path = Path("/Volumes/sn580/projects/myagent/workspace/dsdasad.md")
     content = prompt_path.read_text()
     # Configure the agent
     agent_config = AgentConfig().from_markdown(content)

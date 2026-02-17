@@ -2,7 +2,7 @@
 Unified LLM Client for kagent - supports multiple providers.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from kagent.llm.base import BaseLLMProvider, LLMResponse
 from kagent.llm.openai_provider import OpenAIProvider
@@ -13,11 +13,11 @@ class LLMClient:
     Unified LLM Client that supports multiple providers.
 
     Usage:
-        # OpenAI
+        # From preset (recommended)
+        client = LLMClient.from_preset("deepseek")
+        
+        # From environment
         client = LLMClient.from_env("openai", model="gpt-4")
-
-        # Claude
-        client = LLMClient.from_env("claude", model="claude-3-sonnet-20240229")
 
         # Custom provider
         client = LLMClient(provider=MyCustomProvider())
@@ -31,6 +31,31 @@ class LLMClient:
             provider: LLM provider instance
         """
         self.provider = provider
+
+    @classmethod
+    def from_preset(cls, preset_name: str) -> "LLMClient":
+        """
+        Create LLMClient from a preset name.
+        
+        Args:
+            preset_name: Preset name (e.g., "deepseek", "gpt4o", "claude-sonnet")
+        
+        Returns:
+            LLMClient instance
+        
+        Example:
+            client = LLMClient.from_preset("deepseek")
+        """
+        from kagent.llm.preset import PresetManager
+        
+        manager = PresetManager.load()
+        preset = manager.get(preset_name)
+        
+        if preset is None:
+            available = ", ".join(manager.list())
+            raise ValueError(f"Unknown preset: '{preset_name}'. Available: {available}")
+        
+        return cls.from_env(**preset.to_llm_kwargs())
 
     @classmethod
     def from_env(cls, provider_type: str = "openai", **kwargs) -> "LLMClient":

@@ -48,8 +48,7 @@ def create_agent() -> Agent:
     Returns:
         Configured Agent instance ready for use
     """
-    # Initialize LLM client from environment
-    llm_client = LLMClient.from_env("openai", model="longcat-flash-lite")
+    llm_client = LLMClient.from_preset("modelscope")
     
     # Initialize tool manager with built-in tools
     tool_manager = ToolManager(load_builtin=True, load_mcp=False)

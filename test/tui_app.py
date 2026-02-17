@@ -54,13 +54,13 @@ def create_agent() -> Agent:
         Configured Agent instance ready for use
     """
     # Initialize LLM client from environment
-    llm_client = LLMClient.from_env("openai", model="longcat-flash-lite")
+    llm_client = LLMClient.from_preset("modelscope")
     
     # Initialize tool manager with built-in tools
-    tool_manager = ToolManager(load_builtin=True, load_mcp=False)
+    tool_manager = ToolManager(load_builtin=True, load_mcp=True)
     
     # Initialize skill library (disable auto-load to avoid output pollution in TUI)
-    skill_library = SkillLibrary(auto_load=False)
+    skill_library = SkillLibrary(auto_load=True)
     
     # Initialize context manager for conversation handling
     context_manager = ContextManager(llm_client=llm_client)
