@@ -11,6 +11,15 @@ from kagent.core.events import MessageEvent
 from kagent.interaction.hook import HookDispatcher, HookResult, HookAction
 
 
+def _setup_scheduler_session():
+    try:
+        from kagent.tools.scheduler import set_current_session_id
+
+        return set_current_session_id
+    except ImportError:
+        return None
+
+
 @dataclass
 class HandleResult:
     message: str
@@ -96,14 +105,20 @@ class InteractionManager:
         """
         The main entry point for any channel.
         Processes the text for a specific session and returns the response.
-        
+
         Args:
             text: User input text
             session_id: Session identifier
             on_message: Optional async callback for message events
         """
+        set_session = _setup_scheduler_session()
+        if set_session:
+            set_session(session_id)
+
         if self.agent is None:
-            return HandleResult.response("Error: Agent not set. Please call set_agent() first.")
+            return HandleResult.response(
+                "Error: Agent not set. Please call set_agent() first."
+            )
 
         runtime = self._get_or_create_runtime(session_id)
 
@@ -122,6 +137,52 @@ class InteractionManager:
             return HandleResult.response(response)
         except Exception as e:
             return HandleResult.response(f"Agent error: {str(e)}")
+
+    async def handle_scheduled_task(
+        self,
+        instruction: str,
+        session_id: str,
+        trigger_info: Optional[str] = None,
+    ) -> HandleResult:
+        """
+        Handle a scheduled task execution.
+        This simulates a user message at the scheduled time.
+
+        Args:
+            instruction: The task instruction to execute
+            session_id: Session to use for execution
+            trigger_info: Information about the trigger (for system prompt)
+        """
+        if self.agent is None:
+            return HandleResult.response("Error: Agent not set.")
+
+        runtime = self._get_or_create_runtime(session_id)
+
+        if trigger_info:
+            system_msg = f"[定时任务] 这是一个定时任务触发的请求。任务信息：{trigger_info}。请正常处理此请求。"
+            if (
+                runtime.conversation_history
+                and runtime.conversation_history[0].get("role") == "system"
+            ):
+                original_system = runtime.conversation_history[0].get("content", "")
+                runtime.conversation_history[0]["content"] = (
+                    original_system + "\n\n" + system_msg
+                )
+            else:
+                runtime.conversation_history.insert(
+                    0, {"role": "system", "content": system_msg}
+                )
+
+        try:
+            response = await self.agent.chat(
+                runtime=runtime,
+                user_input=instruction,
+                on_message=None,
+            )
+            self._save_runtime(runtime)
+            return HandleResult.response(response)
+        except Exception as e:
+            return HandleResult.response(f"定时任务执行错误: {str(e)}")
 
     def _get_or_create_runtime(self, session_id: str) -> AgentRuntime:
         """Get existing runtime or create new one for the session."""
@@ -167,8 +228,7 @@ class InteractionManager:
         self._save_runtime(new_runtime)
 
         return HookResult.switch_session(
-            f"✅ New session created: {session_id}",
-            session_id
+            f"✅ New session created: {session_id}", session_id
         )
 
     async def hook_switch_session(self, *args, **kwargs) -> HookResult:
@@ -182,14 +242,15 @@ class InteractionManager:
 
         if session_id not in self.available_sessions:
             available = ", ".join(self.available_sessions.keys())
-            return HookResult.error(f"❌ Session '{session_id}' not found. Available: {available}")
+            return HookResult.error(
+                f"❌ Session '{session_id}' not found. Available: {available}"
+            )
 
         if runtime:
             self._save_runtime(runtime)
 
         return HookResult.switch_session(
-            f"✅ Switched to session: {session_id}",
-            session_id
+            f"✅ Switched to session: {session_id}", session_id
         )
 
     async def hook_list_sessions(self, *args, **kwargs) -> HookResult:
@@ -228,7 +289,7 @@ class InteractionManager:
             new_session = remaining[0] if remaining else None
             return HookResult.refresh_sessions(
                 f"✅ Session '{session_id}' deleted. Current session was deleted.",
-                new_session_id=new_session
+                new_session_id=new_session,
             )
 
         return HookResult.ok(f"✅ Session '{session_id}' deleted.")
@@ -262,8 +323,7 @@ class InteractionManager:
 
         if old_name == current_session_id:
             return HookResult.switch_session(
-                f"✅ Session renamed: {old_name} -> {new_name}",
-                new_name
+                f"✅ Session renamed: {old_name} -> {new_name}", new_name
             )
 
         return HookResult.ok(f"✅ Session renamed: {old_name} -> {new_name}")
@@ -332,18 +392,26 @@ class InteractionManager:
 
         if not enabled_tools:
             tools = self.agent.tool_manager.get_all_tools()
-            lines = [f"🔧 All Available Tools ({len(tools)}) - none specifically enabled:"]
+            lines = [
+                f"🔧 All Available Tools ({len(tools)}) - none specifically enabled:"
+            ]
             for tool in tools:
                 name = tool.get("function", {}).get("name", "unknown")
                 desc = tool.get("function", {}).get("description", "No description")
                 lines.append(f"  • {name}: {desc}")
             return HookResult.ok("\n".join(lines))
 
-        lines = [f"🔧 Enabled Tools ({len(enabled_tools)}) for session '{runtime.session_id}':"]
+        lines = [
+            f"🔧 Enabled Tools ({len(enabled_tools)}) for session '{runtime.session_id}':"
+        ]
         for tool_name in enabled_tools:
             tool = self.agent.tool_manager.get_tool(tool_name)
             if tool:
-                desc = tool.description if hasattr(tool, 'description') else "No description"
+                desc = (
+                    tool.description
+                    if hasattr(tool, "description")
+                    else "No description"
+                )
                 lines.append(f"  ✅ {tool_name}: {desc}")
             else:
                 lines.append(f"  ⚠️  {tool_name}: Tool not found")
@@ -384,7 +452,9 @@ class ChannelAdapter:
     Provides a unified interface for channel-to-manager communication.
     """
 
-    def __init__(self, manager: InteractionManager, channel: Optional["BaseChannel"] = None):
+    def __init__(
+        self, manager: InteractionManager, channel: Optional["BaseChannel"] = None
+    ):
         self.manager = manager
         self.channel = channel
 
@@ -394,7 +464,9 @@ class ChannelAdapter:
         This is the unified entry point for all channels.
         """
         on_message = None
-        if self.channel and hasattr(self.channel, 'on_message'):
+        if self.channel and hasattr(self.channel, "on_message"):
             on_message = self.channel.on_message
-        
-        return await self.manager.handle_request(text, session_id, on_message=on_message)
+
+        return await self.manager.handle_request(
+            text, session_id, on_message=on_message
+        )

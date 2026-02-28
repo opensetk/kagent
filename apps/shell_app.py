@@ -43,29 +43,34 @@ from kagent.core.agent import AgentConfig
 from kagent.llm.client import LLMClient
 from kagent.interaction.manager import InteractionManager
 from kagent.channel.shell import ShellChannel
+from kagent.tools.scheduler import (
+    get_scheduler,
+    set_interaction_manager,
+    set_active_channel,
+)
 
 
 def create_agent() -> Agent:
     """
     Create and configure the Agent with all necessary components.
-    
+
     Returns:
         Configured Agent instance ready for use
     """
     # Initialize LLM client from environment
     # Supports: openai, claude, etc.
     llm_client = LLMClient.from_preset("modelscope")
-    
+
     # Initialize tool manager with built-in tools
     # Set load_mcp=True if you want to load MCP tools from .agent/mcp.json
     tool_manager = ToolManager(load_builtin=True, load_mcp=True)
-    
+
     # Initialize skill library
     skill_library = SkillLibrary(auto_load=True)
-    
+
     # Initialize context manager for conversation handling
     context_manager = ContextManager(llm_client=llm_client)
-    prompt_path = Path("/Volumes/sn580/projects/myagent/workspace/dsdasad.md")
+    prompt_path = Path("/Volumes/sn580/projects/myagent/workspace/KAGENT.md")
     content = prompt_path.read_text()
     # Configure the agent
     agent_config = AgentConfig().from_markdown(content)
@@ -78,20 +83,20 @@ def create_agent() -> Agent:
         tool_manager=tool_manager,
         skill_library=skill_library,
     )
-    
+
     return agent
 
 
 async def main():
     """
     Main entry point for the shell application.
-    
+
     Sets up the InteractionManager, creates the ShellChannel,
     and starts the interactive loop.
     """
     print("🚀 Starting KAgent Shell...")
     print()
-        
+
     # Create the agent
     try:
         agent = create_agent()
@@ -99,33 +104,42 @@ async def main():
     except Exception as e:
         print(f"❌ Failed to initialize agent: {e}")
         sys.exit(1)
-    
+
     # Create the interaction manager
     # Sessions will be saved to .agent/sessions/
     interaction_manager = InteractionManager(sessions_dir=".agent/sessions")
     interaction_manager.set_agent(agent)
     print(f"✅ InteractionManager initialized")
     print(f"   Sessions directory: {interaction_manager.sessions_dir}")
-    
+
+    # Set up scheduler with interaction manager
+    set_interaction_manager(interaction_manager)
+    scheduler = get_scheduler()
+    print(f"✅ Scheduler initialized")
+
     # Load existing sessions
     if interaction_manager.available_sessions:
-        print(f"✅ Loaded {len(interaction_manager.available_sessions)} existing session(s)")
+        print(
+            f"✅ Loaded {len(interaction_manager.available_sessions)} existing session(s)"
+        )
         for sid in interaction_manager.available_sessions.keys():
             print(f"   - {sid}")
     else:
         print("📭 No existing sessions found")
-    
+
     print()
-    
+
     # Create and start the shell channel
-    shell_channel = ShellChannel(session_id="default",show_tool_calls=True)
-    
+    shell_channel = ShellChannel(session_id="default", show_tool_calls=True)
+    set_active_channel(shell_channel)
+
     try:
         # Run the shell with the interaction manager
         await shell_channel.run_with_manager(interaction_manager)
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         # Save all sessions on exit

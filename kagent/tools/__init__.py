@@ -16,3 +16,4 @@ from . import edit
 from . import glob
 from . import grep
 from . import todo
+from . import scheduler

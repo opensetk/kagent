@@ -9,25 +9,31 @@ from dotenv import load_dotenv
 from kagent.channel.base import BaseChannel
 from kagent.interaction.hook import HookAction
 
+try:
+    from kagent.tools.scheduler import set_target_id, set_current_session_id
+except ImportError:
+    set_target_id = None
+    set_current_session_id = None
+
 load_dotenv()
 
 
 class LarkChannel(BaseChannel):
     """
     封装飞书长连接客户端，继承自 BaseChannel。
-    
+
     - chat_id: 飞书的聊天标识，用于路由消息（决定发给谁）
     - session_id: Agent 的会话标识，全局共享，可跨渠道访问
-    
+
     每个飞书聊天维护一个"当前 session_id"状态，
     用户可以通过 /switch 切换到任意 session。
     """
 
     def __init__(
-        self, 
-        app_id: Optional[str] = None, 
+        self,
+        app_id: Optional[str] = None,
         app_secret: Optional[str] = None,
-        show_tool_calls: bool = False
+        show_tool_calls: bool = False,
     ):
         super().__init__(show_tool_calls=show_tool_calls)
         self.app_id = app_id or os.getenv("APP_ID")
@@ -39,10 +45,10 @@ class LarkChannel(BaseChannel):
             )
 
         self.loop = asyncio.get_event_loop()
-        
+
         self.chat_sessions: Dict[str, str] = {}
         self.interaction_manager = None
-        
+
         self.event_handler = (
             lark.EventDispatcherHandler.builder(self.app_id, self.app_secret)
             .register_p2_im_message_receive_v1(self._do_p2_im_message_receive_v1)
@@ -66,7 +72,7 @@ class LarkChannel(BaseChannel):
     def _set_current_session(self, chat_id: str, session_id: str):
         """设置当前聊天的 session_id"""
         self.chat_sessions[chat_id] = session_id
-    
+
     def set_interaction_manager(self, interaction_manager):
         """Set the interaction manager for the Lark channel."""
         self.interaction_manager = interaction_manager
@@ -130,38 +136,19 @@ class LarkChannel(BaseChannel):
         return {
             "zh_cn": {
                 "title": "Agent 回复",
-                "content": [
-                    [
-                        {
-                            "tag": "md",
-                            "text": content
-                        }
-                    ]
-                ]
+                "content": [[{"tag": "md", "text": content}]],
             }
         }
 
     def _build_interactive_content(self, content: str) -> Dict[str, Any]:
         return {
             "schema": "2.0",
-            "config": {
-                "wide_screen_mode": True
-            },
+            "config": {"wide_screen_mode": True},
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": "Agent 回复"
-                },
-                "template": "blue"
+                "title": {"tag": "plain_text", "content": "Agent 回复"},
+                "template": "blue",
             },
-            "body": {
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": content
-                    }
-                ]
-            }
+            "body": {"elements": [{"tag": "markdown", "content": content}]},
         }
 
     def _do_p2_im_message_receive_v1(
@@ -194,11 +181,16 @@ class LarkChannel(BaseChannel):
 
             session_id = self._get_current_session(chat_id)
 
+            # Set up scheduler context for this message
+            if set_current_session_id:
+                set_current_session_id(session_id)
+            if set_target_id:
+                target_id_type = "open_id" if sender_id.open_id else "user_id"
+                set_target_id(receive_id, target_id_type)
+
             if self.interaction_manager:
                 result = await self.interaction_manager.handle_request(
-                    content_raw, 
-                    session_id,
-                    on_message=self.on_message
+                    content_raw, session_id, on_message=self.on_message
                 )
                 reply_content = self._format_result(result, chat_id)
             elif self.message_handler:
@@ -219,20 +211,20 @@ class LarkChannel(BaseChannel):
 
     def _format_result(self, result, chat_id: str) -> str:
         """Format HandleResult for Lark channel, handling actions appropriately."""
-        action = getattr(result, 'action', None)
-        action_data = getattr(result, 'action_data', {})
+        action = getattr(result, "action", None)
+        action_data = getattr(result, "action_data", {})
 
         if action == HookAction.SWITCH_SESSION:
             target_session_id = action_data.get("session_id")
             if target_session_id:
                 self._set_current_session(chat_id, target_session_id)
                 return f"✅ 已切换到会话: {target_session_id}\n\n{result.message}"
-        
+
         elif action == HookAction.REFRESH_SESSIONS:
             new_session_id = action_data.get("new_session_id")
             if new_session_id:
                 self._set_current_session(chat_id, new_session_id)
-        
+
         return str(result)
 
     def _do_p2_im_chat_member_bot_added_v1(
@@ -265,6 +257,7 @@ class LarkChannel(BaseChannel):
 
 
 if __name__ == "__main__":
+
     async def main():
         try:
             client = LarkChannel()
