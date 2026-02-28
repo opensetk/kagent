@@ -149,8 +149,8 @@ class PresetManager:
         presets = dict(cls.DEFAULT_PRESETS)
         
         if config_path is None:
-            home_config = Path.home() / ".kagent" / ".presets.json"
-            local_config = Path(".agent/.presets.json")
+            home_config = Path.home() / ".kagent" / "presets.json"
+            local_config = Path(".agent/presets.json")
             config_path = str(home_config) if home_config.exists() else str(local_config)
         
         path = Path(config_path)
