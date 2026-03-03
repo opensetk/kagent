@@ -5,4 +5,4 @@ sessions/*
 .agent/awesome-claude-skills/*
 .npm-cache/*
 workspace/*
-.agent/.presets.json
+.agent/presets.json
